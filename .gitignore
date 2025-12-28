@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment
+.env
+.env.local
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Run artifacts (generated during pipeline execution)
+runs/
+
+# Project data (generated embeddings and chunks)
+projects/*/data/
+projects/*/runs/
+projects/*/node_modules/
+projects/*/dist/
+
+# Temporary files
+*.tmp
+*.temp

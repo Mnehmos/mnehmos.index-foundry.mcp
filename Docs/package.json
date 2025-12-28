@@ -1,0 +1,54 @@
+{
+  "name": "indexfoundry-mcp-server",
+  "version": "0.1.0",
+  "description": "Deterministic Vector Index Factory - MCP server for automated vector database creation",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js",
+    "start:http": "TRANSPORT=http node dist/index.js",
+    "test": "vitest",
+    "lint": "eslint src/**/*.ts",
+    "clean": "rm -rf dist",
+    "inspector": "npx @modelcontextprotocol/inspector"
+  },
+  "keywords": [
+    "mcp",
+    "vector-database",
+    "rag",
+    "embeddings",
+    "llm",
+    "ingestion",
+    "deterministic"
+  ],
+  "author": "Mnehmos",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "express": "^4.18.2",
+    "zod": "^3.22.4",
+    "uuid": "^9.0.0",
+    "glob": "^10.3.10",
+    "mime-types": "^2.1.35",
+    "pdf-parse": "^1.1.1",
+    "cheerio": "^1.0.0-rc.12",
+    "langdetect": "^0.2.1",
+    "simhash-js": "^1.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/express": "^4.17.21",
+    "@types/uuid": "^9.0.7",
+    "@types/mime-types": "^2.1.4",
+    "typescript": "^5.3.0",
+    "vitest": "^1.0.0",
+    "eslint": "^8.55.0",
+    "@typescript-eslint/eslint-plugin": "^6.13.0",
+    "@typescript-eslint/parser": "^6.13.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

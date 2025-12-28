@@ -1,0 +1,23 @@
+{
+  "project_id": "dnd-chatbot",
+  "name": "D&D 5e Chatbot",
+  "description": "D&D 5e rules and World's Largest Dungeon chatbot with hybrid search",
+  "created_at": "2025-12-26T20:49:42.648Z",
+  "updated_at": "2025-12-26T21:20:30.890Z",
+  "embedding_model": {
+    "provider": "openai",
+    "model_name": "text-embedding-3-small",
+    "api_key_env": "OPENAI_API_KEY"
+  },
+  "chunk_config": {
+    "strategy": "recursive",
+    "max_chars": 1500,
+    "overlap_chars": 150
+  },
+  "stats": {
+    "sources_count": 3,
+    "chunks_count": 2155,
+    "vectors_count": 2155,
+    "total_tokens": 845324
+  }
+}

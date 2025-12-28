@@ -1,0 +1,54 @@
+{
+  "name": "mnehmos.index-foundry.mcp",
+  "version": "1.0.0",
+  "description": "Deterministic Vector Index Factory - MCP Server",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "mnehmos-index-foundry-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc && npm run copy-templates",
+    "copy-templates": "xcopy /Y /I src\\templates dist\\templates",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "test": "vitest",
+    "lint": "eslint src --ext .ts",
+    "clean": "rimraf dist"
+  },
+  "keywords": [
+    "mcp",
+    "vector-database",
+    "rag",
+    "embeddings",
+    "indexing"
+  ],
+  "author": "Mnehmos",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "cheerio": "^1.0.0",
+    "fast-xml-parser": "^4.5.1",
+    "franc-min": "^6.2.0",
+    "glob": "^11.0.0",
+    "openai": "^4.77.0",
+    "pdf-parse": "^1.1.1",
+    "simhash-js": "^1.0.0",
+    "tesseract.js": "^7.0.0",
+    "uuid": "^11.0.3",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/pdf-parse": "^1.1.4",
+    "@types/uuid": "^10.0.0",
+    "pdf-lib": "^1.17.1",
+    "rimraf": "^6.0.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

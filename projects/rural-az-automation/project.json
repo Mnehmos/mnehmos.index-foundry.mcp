@@ -1,0 +1,23 @@
+{
+  "project_id": "rural-az-automation",
+  "name": "Rural Arizona Business Automation with AI Agents",
+  "description": "A RAG-powered knowledge base adapting \"Automate the Boring Stuff with Python\" concepts for AI agents. Covers classical automation (AI agents writing code) and contextual automation (chatbots, email responders) tailored for rural Arizona businesses including agriculture, tourism, small retail, and service industries.",
+  "created_at": "2025-12-26T22:43:03.719Z",
+  "updated_at": "2025-12-26T23:19:22.503Z",
+  "embedding_model": {
+    "provider": "openai",
+    "model_name": "text-embedding-3-small",
+    "api_key_env": "OPENAI_API_KEY"
+  },
+  "chunk_config": {
+    "strategy": "by_heading",
+    "max_chars": 1500,
+    "overlap_chars": 200
+  },
+  "stats": {
+    "sources_count": 16,
+    "chunks_count": 3181,
+    "vectors_count": 3181,
+    "total_tokens": 1201878
+  }
+}

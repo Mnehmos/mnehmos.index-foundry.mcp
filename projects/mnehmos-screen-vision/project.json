@@ -1,0 +1,23 @@
+{
+  "project_id": "mnehmos-screen-vision",
+  "name": "Mnehmos Screen Vision Knowledge Base",
+  "description": "Knowledge base for the screen.vision Tauri desktop conversion project. Contains project reviews, architecture decisions, and development notes.",
+  "created_at": "2025-12-27T19:32:16.269Z",
+  "updated_at": "2025-12-27T20:09:28.750Z",
+  "embedding_model": {
+    "provider": "openai",
+    "model_name": "text-embedding-3-small",
+    "api_key_env": "OPENAI_API_KEY"
+  },
+  "chunk_config": {
+    "strategy": "by_heading",
+    "max_chars": 1500,
+    "overlap_chars": 150
+  },
+  "stats": {
+    "sources_count": 1,
+    "chunks_count": 36,
+    "vectors_count": 36,
+    "total_tokens": 12735
+  }
+}

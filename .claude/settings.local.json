@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find:*)",
+      "Bash(wc:*)",
+      "Bash(npm run build:*)",
+      "Bash(npm install)",
+      "Bash(dir \"C:\\Users\\mnehm\\AppData\\Roaming\\Roo-Code\\MCP\\IndexFoundry\\projects\" /b)",
+      "Bash(dir \"C:\\Users\\mnehm\\AppData\\Roaming\\Roo-Code\\MCP\\IndexFoundry\\projects\\test-rag\" /b)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$(cat <<''EOF''\nBlue phase: Harden code quality for production\n\nThis commit completes the blue phase refactoring:\n\n## Phase 1: Export Function Fix\n- Fixed generateMcpServerSource() to load from sources.jsonl + project.json\n- Added proper type definitions and loadJsonl helper\n- Added list_sources MCP tool\n- Fixed Dockerfile with multi-stage build and health check\n- Updated railway.toml with restart policies\n- Fixed chat endpoint to use /v1/chat/completions API\n\n## Phase 2: Input Validation Hardening  \n- Added safeProjectId, safeUrl, safeFilePath validators\n- Block localhost/private IPs, path traversal, sensitive paths\n- Added length limits and array size limits\n- Reduced max_pages from 10000 to 500\n\n## Phase 3: Error Handling Standardization\n- Updated fetchWithTimeout with size validation\n- Added timeout handling with specific messages\n- Added rate limiting retry for 429 errors\n- Improved error reporting in sitemap crawling\n\n## Phase 4: Observability\n- Added BuildMetrics interface and tracking\n- Added logMetric() for structured JSON logging\n- Track token usage from OpenAI embedding API\n- Cost estimation (~$0.02 per 1M tokens)\n- Build results include duration and cost\n\n## Phase 5: Security Audit\n- URL validation blocks dangerous hosts\n- File path validation prevents traversal\n- Content-Length checking before download\n- File size limits enforced\n\n## Phase 6: Proprietary Headers\n- Added LICENSE file (proprietary, all rights reserved)\n- Added copyright headers to all 13 source files\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n)\")",
+      "Bash(git push)",
+      "Bash(cat:*)",
+      "Bash(npm install:*)"
+    ]
+  }
+}
