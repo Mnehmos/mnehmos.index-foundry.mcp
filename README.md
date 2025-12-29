@@ -489,4 +489,4 @@ docker run -p 8080:8080 -e OPENAI_API_KEY=sk-... my-rag-server
 
 ## License
 
-MIT
+PROPRIETARY SOFTWARE LICENSE
