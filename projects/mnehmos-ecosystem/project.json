@@ -1,0 +1,23 @@
+{
+  "project_id": "mnehmos-ecosystem",
+  "name": "Mnehmos Ecosystem Knowledge Base",
+  "description": "Comprehensive RAG database for all Mnehmos projects including MCP tools, research, games, and the multi-agent framework",
+  "created_at": "2025-12-29T06:03:36.262Z",
+  "updated_at": "2025-12-29T06:27:47.575Z",
+  "embedding_model": {
+    "provider": "openai",
+    "model_name": "text-embedding-3-small",
+    "api_key_env": "OPENAI_API_KEY"
+  },
+  "chunk_config": {
+    "strategy": "recursive",
+    "max_chars": 1500,
+    "overlap_chars": 150
+  },
+  "stats": {
+    "sources_count": 12,
+    "chunks_count": 59310,
+    "vectors_count": 59310,
+    "total_tokens": 45483330
+  }
+}
