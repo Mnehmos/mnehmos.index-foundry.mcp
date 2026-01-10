@@ -7,10 +7,6 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    environment: npm
-    permissions:
-      contents: read
-      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -30,5 +26,7 @@ jobs:
       - name: Run tests
         run: npm test
 
-      - name: Publish to NPM with provenance
-        run: npm publish --provenance --access public
+      - name: Publish to NPM
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
