@@ -22,10 +22,9 @@
 import { z } from 'zod';
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import { createHash } from 'crypto';
 import * as cheerio from 'cheerio';
 import { getRunManager } from '../run-manager.js';
-import { createToolError } from '../utils.js';
+import { createToolError, sha256 } from '../utils.js';
 
 // ============================================================================
 // Type Definitions
@@ -245,7 +244,7 @@ interface RawTableMatch {
  * // returns "a1b2c3d4e5f6g7h8"
  */
 function generateTableId(content: string): string {
-  return createHash('sha256').update(content).digest('hex').slice(0, 16);
+  return sha256(content).slice(0, 16);
 }
 
 /**
@@ -256,7 +255,7 @@ function generateTableId(content: string): string {
  * @returns 16-character hex string
  */
 function generateChunkId(tableId: string, chunkIndex: number): string {
-  return createHash('sha256').update(`${tableId}-chunk-${chunkIndex}`).digest('hex').slice(0, 16);
+  return sha256(`${tableId}-chunk-${chunkIndex}`).slice(0, 16);
 }
 
 // ============================================================================

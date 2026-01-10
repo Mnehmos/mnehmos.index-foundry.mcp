@@ -7,14 +7,25 @@
   "bin": {
     "mnehmos-index-foundry-mcp": "dist/index.js"
   },
+  "files": [
+    "dist/**/*",
+    "src/**/*",
+    "Docs/**/*.md",
+    "README.md",
+    "PROJECT_KNOWLEDGE.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc && npm run copy-templates",
     "copy-templates": "xcopy /Y /I src\\templates dist\\templates",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
-    "test": "vitest",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "lint": "eslint src --ext .ts",
-    "clean": "rimraf dist"
+    "clean": "rimraf dist",
+    "prepublishOnly": "npm run clean && npm run build && npm run test"
   },
   "keywords": [
     "mcp",
@@ -24,7 +35,7 @@
     "indexing"
   ],
   "author": "Mnehmos",
-  "license": "MIT",
+  "license": "Proprietary",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
     "cheerio": "^1.0.0",

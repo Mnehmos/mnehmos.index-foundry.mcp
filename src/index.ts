@@ -79,7 +79,9 @@ import {
   projectGet,
   projectDelete,
   projectAddSource,
+  projectRemoveSource,
   projectBuild,
+  projectBuildStatus,
   projectQuery,
   projectExport,
   projectDeploy,
@@ -88,6 +90,17 @@ import {
   projectServeStatus,
   initProjectManager,
 } from "./tools/projects.js";
+
+import {
+  librarianAudit,
+  librarianAssessQuality,
+  formatAuditResponse,
+  formatQualityResponse,
+  initLibrarian,
+  getServerInfo,
+  LibrarianAuditSchema,
+  LibrarianAssessSchema,
+} from "./tools/librarian.js";
 
 // Schemas
 import {
@@ -121,7 +134,11 @@ import {
   ProjectGetSchema,
   ProjectDeleteSchema,
   ProjectAddSourceSchema,
+  ProjectAddSourceBaseSchema,
+  ProjectRemoveSourceSchema,
+  ProjectRemoveSourceBaseSchema,
   ProjectBuildSchema,
+  ProjectBuildStatusSchema,
   ProjectQuerySchema,
   ProjectExportSchema,
   ProjectDeploySchema,
@@ -441,6 +458,10 @@ server.tool(
   "indexfoundry_project_create",
   `🏗️ [STEP 1/5: CREATE] Create a new RAG project.
 
+📁 STORAGE LOCATION:
+Projects are stored in the IndexFoundry installation directory:
+  {indexfoundry-install-path}/projects/{project_id}/
+
 PROJECT PIPELINE OVERVIEW:
 1. project_create → Initialize project structure
 2. project_add_source → Add URLs, PDFs, folders, or sitemaps
@@ -454,14 +475,26 @@ WHAT THIS DOES:
 - Generates deployment boilerplate (Dockerfile, package.json)
 - Creates frontend/index.html chat interface
 
+LIBRARIAN PROTOCOL TIP:
+After creating a project, use librarian_audit to verify project state
+before proceeding with add_source or build operations.
+
 NEXT STEPS:
 - Use project_add_source to add your content (URLs, PDFs, folders)
 - Multiple sources can be added before building`,
   ProjectCreateSchema.shape,
   async (args) => {
     const result = await projectCreate(args as z.infer<typeof ProjectCreateSchema>);
+    // Include server info in result
+    const serverInfo = getServerInfo(SERVER_BASE_DIR);
     return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify({
+        ...result,
+        storage_info: {
+          project_path: `${serverInfo.projects_dir}/${(args as z.infer<typeof ProjectCreateSchema>).project_id}`,
+          indexfoundry_base: serverInfo.server_base_dir,
+        }
+      }, null, 2) }],
     };
   }
 );
@@ -470,14 +503,25 @@ server.tool(
   "indexfoundry_project_list",
   `📋 List all IndexFoundry projects.
 
+📁 STORAGE LOCATION:
+All projects are stored in: {indexfoundry-install-path}/projects/
+Each project has its own subdirectory with data/, src/, and frontend/.
+
 USE WHEN: You need to see what projects exist or check their stats
 
 RETURNS: Array of { project_id, name, created_at, stats? }`,
   ProjectListSchema.shape,
   async (args) => {
     const result = await projectList(args as z.infer<typeof ProjectListSchema>);
+    const serverInfo = getServerInfo(SERVER_BASE_DIR);
     return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify({
+        ...result,
+        storage_info: {
+          projects_directory: serverInfo.projects_dir,
+          indexfoundry_base: serverInfo.server_base_dir,
+        }
+      }, null, 2) }],
     };
   }
 );
@@ -512,25 +556,30 @@ server.tool(
 
 server.tool(
   "indexfoundry_project_add_source",
-  `📥 [STEP 2/5: ADD] Add a data source to a project.
+  `📥 [STEP 2/5: ADD] Add data source(s) to a project.
 
 PREREQUISITES: project_create must have been run first
 
-SOURCE TYPES (use exactly one):
+SOURCE TYPES (use exactly one per source):
 - url: Single webpage (HTML content extracted)
 - sitemap_url: Crawl all pages in sitemap.xml
 - folder_path: Local folder with text/markdown/PDF files
 - pdf_path: Single PDF file (local path or URL)
 
+MODES:
+- Single: Provide one source directly in parameters
+- Batch: Use \`batch\` array for multiple sources at once (max 50)
+
 WHAT THIS DOES:
-- Validates source is accessible
-- Creates source record in sources.jsonl
-- Queues source for processing by project_build
+- Validates source(s) are accessible
+- Creates source record(s) in sources.jsonl
+- Skips duplicates (same URI already exists)
+- Queues source(s) for processing by project_build
 
 NEXT STEPS:
 - Add more sources with additional calls to project_add_source
 - Run project_build when all sources are added`,
-  ProjectAddSourceSchema.shape,
+  ProjectAddSourceBaseSchema.shape,
   async (args) => {
     const result = await projectAddSource(args as z.infer<typeof ProjectAddSourceSchema>);
     return {
@@ -540,29 +589,91 @@ NEXT STEPS:
 );
 
 server.tool(
+  "indexfoundry_project_remove_source",
+  `🗑️ Remove source(s) from a project with cascade deletion.
+
+PREREQUISITES: project_create must have been run
+
+MODES:
+- Single: Provide source_id or source_uri to remove one source
+- Batch: Use \`batch\` array for multiple removals (max 50)
+
+CASCADE OPTIONS:
+- remove_chunks: Remove associated chunks (default: true)
+- remove_vectors: Remove associated vectors (default: true)
+
+SAFETY: Requires confirm: true when cascade is enabled
+
+WHAT THIS DOES:
+- Removes source record(s) from sources.jsonl
+- Optionally removes chunks and vectors for those sources
+- Updates manifest stats
+
+USE WHEN: You need to remove bad/duplicate sources or replace content`,
+  ProjectRemoveSourceBaseSchema.shape,
+  async (args) => {
+    const result = await projectRemoveSource(args as z.infer<typeof ProjectRemoveSourceSchema>);
+    return {
+      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+    };
+  }
+);
+
+server.tool(
   "indexfoundry_project_build",
-  `⚙️ [STEP 3/5: BUILD] Process all pending sources into searchable chunks.
+  `⚙️ [STEP 3/5: BUILD] Process pending sources into searchable chunks.
 
 PREREQUISITES:
 - project_create must have been run
 - project_add_source must have added at least one source
 
+CHUNKING OPTIONS (optional chunk_options):
+- max_sources_per_build: Process N sources per call (default: 10)
+- fetch_concurrency: Parallel URL fetches (default: 3)
+- enable_checkpointing: Enable resume capability (default: true)
+
 WHAT THIS DOES:
-1. Fetches content from each pending source
+1. Fetches content from pending sources (up to max_sources_per_build)
 2. Extracts text (HTML parsing, PDF extraction, etc.)
 3. Chunks text with overlap for context continuity
 4. Generates embeddings using OpenAI API (requires OPENAI_API_KEY)
-5. Appends chunks and vectors to data/chunks.jsonl and data/vectors.jsonl
+5. Saves checkpoint after each source for resumability
+6. Returns progress with remaining sources count
+
+RESUME: Use resume_from_checkpoint=true to continue after timeout/failure
 
 COST: ~$0.02 per 1M tokens embedded (text-embedding-3-small)
 
 NEXT STEPS:
-- Use project_query to test search quality
-- Run project_export to generate server code
-- Run project_serve to start local server for testing`,
+- If has_more=true: call project_build again to continue
+- Use project_build_status to check checkpoint state
+- Use project_query to test search quality`,
   ProjectBuildSchema.shape,
   async (args) => {
     const result = await projectBuild(args as z.infer<typeof ProjectBuildSchema>);
+    return {
+      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+    };
+  }
+);
+
+server.tool(
+  "indexfoundry_project_build_status",
+  `📊 Get build status and checkpoint information for a project.
+
+USE WHEN: You need to check if a build is in progress or can be resumed
+
+RETURNS:
+- state: 'idle' | 'in_progress' | 'checkpoint_available'
+- checkpoint: Details about saved checkpoint (if any)
+- pending_sources: Number of sources waiting to be processed
+- failed_sources: Number of sources that failed
+- recommendation: Suggested next action
+
+USE THIS BEFORE project_build to determine optimal strategy`,
+  ProjectBuildStatusSchema.shape,
+  async (args) => {
+    const result = await projectBuildStatus(args as z.infer<typeof ProjectBuildStatusSchema>);
     return {
       content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
     };
@@ -832,6 +943,119 @@ server.tool(
 );
 
 // ============================================================================
+// LIBRARIAN PROTOCOL TOOLS (ADR-007)
+// ============================================================================
+
+server.tool(
+  "indexfoundry_librarian_audit",
+  `📚 [LIBRARIAN PROTOCOL] Audit project state for health and readiness.
+
+THE LIBRARIAN PROTOCOL:
+The Librarian is an Active Data Curator that validates index state before
+queries and self-corrects when retrieval quality is poor. Use this tool
+to implement the "Reason Over State" principle.
+
+WHAT THIS DOES:
+1. Validates project manifest exists and is valid
+2. Counts sources (pending/failed/processed)
+3. Verifies chunks and vectors are in sync
+4. Checks if server is running
+5. Generates actionable recommendations
+
+USE WHEN:
+- Before running queries on a project
+- After adding sources to check build status
+- To diagnose retrieval problems
+- Before deploying to production
+
+LIBRARIAN THRESHOLDS (customizable):
+- min_chunk_score: 0.50 (individual relevance)
+- avg_result_score: 0.65 (overall quality gate)
+- classification_confidence: 0.50 (intent reliability)
+
+RETURNS: State audit with health status, issues, and recommendations`,
+  LibrarianAuditSchema.shape,
+  async (args) => {
+    const result = await librarianAudit(args as z.infer<typeof LibrarianAuditSchema>);
+    if (result.success) {
+      return {
+        content: [{ type: "text", text: formatAuditResponse(result.audit) }],
+      };
+    }
+    return {
+      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+    };
+  }
+);
+
+server.tool(
+  "indexfoundry_librarian_assess",
+  `📊 [LIBRARIAN PROTOCOL] Assess retrieval quality after a query.
+
+THE LIBRARIAN PROTOCOL:
+After running project_query, use this tool to assess whether the results
+meet quality thresholds. The Librarian will recommend debugging or repair
+actions if quality is marginal or poor.
+
+WHAT THIS DOES:
+1. Calculates min/max/avg scores from results
+2. Compares against quality thresholds
+3. Assigns quality level (excellent/good/marginal/poor)
+4. Generates recommendations based on quality
+5. Suggests debug_query or re-chunking if needed
+
+QUALITY LEVELS:
+- Excellent: avg >= 0.80, min >= 0.60
+- Good: meets configured thresholds
+- Marginal: close to threshold (within 80%)
+- Poor: below thresholds
+
+USE WHEN:
+- After project_query to validate results
+- Before returning answers to users
+- To decide if re-indexing is needed
+
+RETURNS: Quality assessment with scores, thresholds, and recommendations`,
+  LibrarianAssessSchema.shape,
+  async (args) => {
+    const result = librarianAssessQuality(args as z.infer<typeof LibrarianAssessSchema>);
+    return {
+      content: [{ type: "text", text: formatQualityResponse(result) }],
+    };
+  }
+);
+
+server.tool(
+  "indexfoundry_get_server_info",
+  `ℹ️ Get IndexFoundry server installation information.
+
+WHAT THIS RETURNS:
+- server_base_dir: Where IndexFoundry is installed
+- projects_dir: Where all projects are stored
+- runs_dir: Where run-based pipeline artifacts are stored
+
+USE WHEN:
+- You need to tell users where their projects are stored
+- You need to reference absolute paths in other tools
+- You want to verify the IndexFoundry installation
+
+This is helpful for explaining to users that projects they create
+are stored within the IndexFoundry installation directory, not in
+their working directory.`,
+  z.object({}).shape,
+  async () => {
+    const serverInfo = getServerInfo(SERVER_BASE_DIR);
+    return {
+      content: [{ type: "text", text: JSON.stringify({
+        success: true,
+        ...serverInfo,
+        note: "Projects created with project_create are stored in projects_dir. Each project has its own subdirectory with data/, src/, and frontend/."
+      }, null, 2) }],
+    };
+  }
+);
+
+// ============================================================================
 // SERVER STARTUP
 // ============================================================================
 
@@ -849,11 +1073,16 @@ async function main() {
   // Initialize the project manager
   initProjectManager(SERVER_BASE_DIR);
 
+  // Initialize the Librarian protocol tools
+  initLibrarian(SERVER_BASE_DIR);
+
   // Connect via stdio transport
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
   console.error("IndexFoundry-MCP server started");
+  console.error(`  Projects directory: ${SERVER_BASE_DIR}/projects`);
+  console.error(`  Runs directory: ${SERVER_BASE_DIR}/runs`);
 }
 
 main().catch((error) => {

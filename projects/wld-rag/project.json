@@ -1,0 +1,22 @@
+{
+  "project_id": "wld-rag",
+  "name": "World's Largest Dungeon RAG Server",
+  "created_at": "2026-01-04T23:30:07.895Z",
+  "updated_at": "2026-01-04T23:43:13.798Z",
+  "embedding_model": {
+    "provider": "openai",
+    "model_name": "text-embedding-3-small",
+    "api_key_env": "OPENAI_API_KEY"
+  },
+  "chunk_config": {
+    "strategy": "recursive",
+    "max_chars": 1500,
+    "overlap_chars": 150
+  },
+  "stats": {
+    "sources_count": 79,
+    "chunks_count": 3894,
+    "vectors_count": 3894,
+    "total_tokens": 1501462
+  }
+}

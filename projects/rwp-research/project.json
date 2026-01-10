@@ -1,0 +1,29 @@
+{
+  "project_id": "rwp-research",
+  "name": "Right-Wing Predators Research",
+  "description": "Searchable database of right-wing extremists and sexual predators for investigative research",
+  "created_at": "2026-01-07T07:13:00.000Z",
+  "embedding_model": {
+    "provider": "openai",
+    "model_name": "text-embedding-3-small",
+    "api_key_env": "OPENAI_API_KEY"
+  },
+  "chunk_config": {
+    "strategy": "recursive",
+    "max_chars": 1500,
+    "overlap_chars": 200
+  },
+  "sources": [],
+  "stats": {
+    "total_sources": 0,
+    "processed_sources": 0,
+    "failed_sources": 0,
+    "total_chunks": 0,
+    "total_vectors": 0,
+    "chunks_count": 1872,
+    "vectors_count": 1872,
+    "total_tokens": 610345,
+    "sources_count": null
+  },
+  "updated_at": "2026-01-07T07:53:05.656Z"
+}

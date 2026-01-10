@@ -361,6 +361,14 @@ export type ErrorCode =
   | "NOT_EXPORTED"
   | "ENV_VAR_FAILED"
   | "DEPLOY_FAILED"
+  // ADR-005: Batch source management errors
+  | "MUTUAL_EXCLUSIVITY"
+  | "BATCH_ADD_FAILED"
+  | "REMOVE_FAILED"
+  | "SOURCE_PROCESSING"
+  | "CONFIRMATION_REQUIRED"
+  // ADR-006: Build chunking errors
+  | "STATUS_FAILED"
   // Server errors
   | "ALREADY_RUNNING"
   | "NOT_RUNNING"
@@ -370,6 +378,7 @@ export type ErrorCode =
   | "STOP_FAILED";
 
 export interface ToolError {
+  success: false;
   isError: true;
   code: ErrorCode;
   message: string;
@@ -390,3 +399,143 @@ export interface EventLogEntry {
   message: string;
   data?: unknown;
 }
+
+// ============================================================================
+// Librarian Protocol Types (ADR-007)
+// ============================================================================
+
+/**
+ * Query classification result from classify_query tool
+ */
+export interface QueryClassification {
+  query_type: "factual" | "procedural" | "conceptual" | "navigational" | "conversational";
+  complexity: "simple" | "moderate" | "complex";
+  needs_retrieval: boolean;
+  confidence: number;
+  suggested_mode: "semantic" | "keyword" | "hybrid";
+  reasoning?: string;
+}
+
+/**
+ * Librarian protocol thresholds for quality gates
+ */
+export interface LibrarianThresholds {
+  min_chunk_score: number;     // Default: 0.50 - individual chunk relevance
+  avg_result_score: number;    // Default: 0.65 - overall quality gate
+  classification_confidence: number; // Default: 0.50 - intent reliability
+}
+
+/**
+ * Result of a Librarian state audit
+ */
+export interface LibrarianStateAudit {
+  project_id: string;
+  timestamp: string;
+  
+  // Manifest state
+  manifest_exists: boolean;
+  manifest_valid: boolean;
+  
+  // Sources state
+  total_sources: number;
+  pending_sources: number;
+  failed_sources: number;
+  processed_sources: number;
+  
+  // Index state
+  total_chunks: number;
+  total_vectors: number;
+  vectors_stale: boolean;
+  
+  // Server state
+  server_running: boolean;
+  server_port?: number;
+  
+  // Overall assessment
+  is_healthy: boolean;
+  issues: string[];
+  recommendations: string[];
+}
+
+/**
+ * Librarian retrieval quality assessment
+ */
+export interface LibrarianQualityAssessment {
+  query: string;
+  result_count: number;
+  min_score: number;
+  max_score: number;
+  avg_score: number;
+  
+  // Quality gates
+  meets_threshold: boolean;
+  threshold_used: number;
+  
+  // Recommendations
+  quality_level: "excellent" | "good" | "marginal" | "poor";
+  recommendations: string[];
+  
+  // Debug info if quality is marginal/poor
+  debug_suggested: boolean;
+  repair_suggested: boolean;
+}
+
+/**
+ * Librarian protocol audit trail entry
+ */
+export interface LibrarianAuditTrail {
+  timestamp: string;
+  operation: "state_check" | "query" | "classify" | "debug" | "repair" | "deploy";
+  project_id: string;
+  
+  // What happened
+  success: boolean;
+  duration_ms: number;
+  
+  // Results
+  state_audit?: LibrarianStateAudit;
+  classification?: QueryClassification;
+  quality_assessment?: LibrarianQualityAssessment;
+  
+  // Actions taken
+  actions_taken: string[];
+  
+  // Metadata
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Librarian comprehensive query result with full audit trail
+ */
+export interface LibrarianQueryResult {
+  // Standard query results
+  success: boolean;
+  results: Array<{
+    chunk_id: string;
+    score: number;
+    text: string;
+    source_id: string;
+    metadata?: Record<string, unknown>;
+  }>;
+  
+  // Librarian audit trail
+  audit: {
+    state_valid: boolean;
+    classification: QueryClassification;
+    quality_assessment: LibrarianQualityAssessment;
+    total_duration_ms: number;
+    steps_executed: string[];
+  };
+  
+  // Recommendations for user
+  recommendations?: string[];
+}
+
+/**
+ * Default Librarian thresholds
+ */
+export const DEFAULT_LIBRARIAN_THRESHOLDS: LibrarianThresholds = {
+  min_chunk_score: 0.50,
+  avg_result_score: 0.65,
+  classification_confidence: 0.50,
+};

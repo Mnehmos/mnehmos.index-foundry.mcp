@@ -108,8 +108,39 @@ export const ProjectDeleteSchema = z.object({
 
 export const SourceType = z.enum(["url", "sitemap", "folder", "pdf", "text"]);
 
+// ============================================================================
+// Batch Source Item Schema (ADR-005)
+// ============================================================================
+
+/** Schema for individual batch item - must have exactly one source type */
+const BatchSourceItemBaseSchema = z.object({
+  url: safeUrl.optional(),
+  sitemap_url: safeUrl.optional(),
+  folder_path: safeFilePath.optional(),
+  pdf_path: z.string().min(1).max(4096).optional(),
+  glob: safeGlob.optional(),
+  include_patterns: z.array(z.string().max(256)).max(50).optional(),
+  exclude_patterns: z.array(z.string().max(256)).max(50).optional(),
+  max_pages: z.number().int().min(1).max(500).optional(),
+  source_name: z.string().max(256).optional(),
+  tags: z.array(safeTag).max(20).optional(),
+});
+
+/**
+ * BatchSourceItemSchema - validates each batch item has exactly one source type
+ * ADR-005: Each batch item must have exactly one of: url, sitemap_url, folder_path, pdf_path
+ */
+export const BatchSourceItemSchema = BatchSourceItemBaseSchema.refine((data) => {
+  const sources = [data.url, data.sitemap_url, data.folder_path, data.pdf_path].filter(Boolean);
+  return sources.length === 1;
+}, "Each batch item must have exactly one source type (url, sitemap_url, folder_path, or pdf_path)");
+
+// ============================================================================
+// Project Add Source Schema (with batch support)
+// ============================================================================
+
 // Base schema for add source (shape is used for MCP tool registration)
-export const ProjectAddSourceSchema = z.object({
+export const ProjectAddSourceBaseSchema = z.object({
   project_id: safeProjectId,
 
   // Source specification (one of these)
@@ -127,18 +158,145 @@ export const ProjectAddSourceSchema = z.object({
   // Metadata
   source_name: z.string().max(256).optional().describe("Human-readable name for this source"),
   tags: z.array(safeTag).max(20).default([]),
+
+  // ADR-005: Batch support
+  batch: z.array(BatchSourceItemBaseSchema).min(1).max(50).optional(),
 });
 
-// Refined schema for runtime validation (exactly one source required)
-export const ProjectAddSourceSchemaRefined = ProjectAddSourceSchema.refine((data) => {
+/**
+ * ProjectAddSourceSchema - enhanced with batch support and mutual exclusivity
+ * ADR-005: Either single source params OR batch array, not both
+ */
+export const ProjectAddSourceSchema = ProjectAddSourceBaseSchema.refine((data) => {
+  const hasSingleSource = [data.url, data.sitemap_url, data.folder_path, data.pdf_path].some(Boolean);
+  const hasBatch = data.batch && data.batch.length > 0;
+  
+  // Cannot have both single source and batch
+  if (hasSingleSource && hasBatch) {
+    return false;
+  }
+  
+  // Must have either single source or batch
+  if (!hasSingleSource && !hasBatch) {
+    return false;
+  }
+  
+  // If batch, validate each item has exactly one source type
+  if (hasBatch) {
+    for (const item of data.batch!) {
+      const sources = [item.url, item.sitemap_url, item.folder_path, item.pdf_path].filter(Boolean);
+      if (sources.length !== 1) {
+        return false;
+      }
+    }
+  }
+  
+  return true;
+}, "Either provide a single source (url, sitemap_url, folder_path, pdf_path) OR a batch array, not both. Each batch item must have exactly one source type.");
+
+// Refined schema for runtime validation (exactly one source required - for non-batch calls)
+export const ProjectAddSourceSchemaRefined = ProjectAddSourceBaseSchema.refine((data) => {
+  // If batch is provided, delegate to batch validation
+  if (data.batch && data.batch.length > 0) {
+    return true;
+  }
+  // Otherwise require exactly one source
   const sources = [data.url, data.sitemap_url, data.folder_path, data.pdf_path].filter(Boolean);
   return sources.length === 1;
 }, "Exactly one source (url, sitemap_url, folder_path, or pdf_path) must be provided");
 
+// ============================================================================
+// Project Remove Source Schema (ADR-005)
+// ============================================================================
+
+/** Schema for batch remove item */
+const RemoveSourceItemSchema = z.object({
+  source_id: z.string().max(64).optional(),
+  source_uri: z.string().max(4096).optional(),
+});
+
+/** Base schema for remove source (shape is used for MCP tool registration) */
+export const ProjectRemoveSourceBaseSchema = z.object({
+  project_id: safeProjectId,
+  source_id: z.string().max(64).optional(),
+  source_uri: z.string().max(4096).optional(),
+  batch: z.array(RemoveSourceItemSchema).max(50).optional(),
+  remove_chunks: z.boolean().default(true),
+  remove_vectors: z.boolean().default(true),
+  confirm: z.boolean().default(false),
+});
+
+/**
+ * ProjectRemoveSourceSchema - for removing sources with cascade deletion
+ * ADR-005: Confirmation required for cascade deletion of chunks/vectors
+ */
+export const ProjectRemoveSourceSchema = ProjectRemoveSourceBaseSchema.refine((data) => {
+  // If remove_chunks or remove_vectors is true, confirm must be true
+  if ((data.remove_chunks || data.remove_vectors) && !data.confirm) {
+    return false;
+  }
+  return true;
+}, "confirm: true is required when remove_chunks or remove_vectors is enabled");
+
+// ============================================================================
+// Build Chunking Schemas (ADR-006)
+// ============================================================================
+
+/**
+ * ChunkOptionsSchema - Configuration for chunked build processing
+ * ADR-006: Defines parameters for controlled batch processing
+ */
+export const ChunkOptionsSchema = z.object({
+  max_sources_per_build: z.number().int().min(1).max(50).default(10),
+  fetch_concurrency: z.number().int().min(1).max(10).default(3),
+  embedding_batch_size: z.number().int().min(10).max(100).default(50),
+  enable_checkpointing: z.boolean().default(true),
+  build_timeout_ms: z.number().int().min(60000).max(1800000).default(300000),
+  timeout_strategy: z.enum(["skip", "checkpoint", "split"]).default("checkpoint"),
+});
+
+/**
+ * BuildCheckpointSchema - Checkpoint persistence for resumable builds
+ * ADR-006: Stores progress state for crash recovery and continuation
+ */
+export const BuildCheckpointSchema = z.object({
+  checkpoint_id: z.string(),
+  project_id: z.string(),
+  created_at: z.string(),
+  completed_source_ids: z.array(z.string()),
+  in_progress_source: z.object({
+    source_id: z.string(),
+    urls_completed: z.array(z.string()).optional(),
+    files_completed: z.array(z.string()).optional(),
+    pending_chunks: z.number().optional(),
+  }).optional(),
+  stats: z.object({
+    chunks_added: z.number(),
+    vectors_added: z.number(),
+    tokens_used: z.number(),
+    duration_ms: z.number(),
+  }),
+});
+
+/**
+ * ProjectBuildStatusSchema - Query build status for a project
+ * ADR-006: New tool for checking build progress and checkpoints
+ */
+export const ProjectBuildStatusSchema = z.object({
+  project_id: safeProjectId,
+});
+
+/**
+ * ProjectBuildSchema - Enhanced with chunk_options and resume parameters
+ * ADR-006: Supports chunked builds with checkpointing
+ */
 export const ProjectBuildSchema = z.object({
   project_id: safeProjectId,
   force: z.boolean().default(false).describe("Rebuild all sources, not just new ones"),
   dry_run: z.boolean().default(false).describe("Show what would be processed without doing it"),
+  chunk_options: ChunkOptionsSchema.optional(),
+  resume_from_checkpoint: z.boolean().optional(),
+  checkpoint_id: z.string().optional(),
 });
 
 export const ProjectQuerySchema = z.object({
@@ -223,7 +381,8 @@ export type ProjectCreateInput = z.infer<typeof ProjectCreateSchema>;
 export type ProjectListInput = z.infer<typeof ProjectListSchema>;
 export type ProjectGetInput = z.infer<typeof ProjectGetSchema>;
 export type ProjectDeleteInput = z.infer<typeof ProjectDeleteSchema>;
-export type ProjectAddSourceInput = z.infer<typeof ProjectAddSourceSchema>;
+// Use z.input to get the input shape (before defaults are applied)
+export type ProjectAddSourceInput = z.input<typeof ProjectAddSourceSchema>;
 export type ProjectBuildInput = z.infer<typeof ProjectBuildSchema>;
 export type ProjectQueryInput = z.infer<typeof ProjectQuerySchema>;
 export type ProjectExportInput = z.infer<typeof ProjectExportSchema>;
@@ -232,6 +391,13 @@ export type ProjectServeInput = z.infer<typeof ProjectServeSchema>;
 export type ProjectServeStopInput = z.infer<typeof ProjectServeStopSchema>;
 export type ProjectServeStatusInput = z.infer<typeof ProjectServeStatusSchema>;
 export type EmbeddingModel = z.infer<typeof EmbeddingModelSchema>;
+// ADR-005: Remove source type
+export type ProjectRemoveSourceInput = z.input<typeof ProjectRemoveSourceSchema>;
+export type BatchSourceItem = z.infer<typeof BatchSourceItemSchema>;
+// ADR-006: Build chunking types
+export type ChunkOptions = z.infer<typeof ChunkOptionsSchema>;
+export type BuildCheckpoint = z.infer<typeof BuildCheckpointSchema>;
+export type ProjectBuildStatusInput = z.infer<typeof ProjectBuildStatusSchema>;
 
 // ============================================================================
 // Internal Types

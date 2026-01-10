@@ -260,6 +260,7 @@ export function createToolError(
   }
 ): ToolError {
   return {
+    success: false,
     isError: true,
     code,
     message,

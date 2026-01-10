@@ -435,8 +435,11 @@ git push origin main
 # Development with watch mode
 npm run dev
 
-# Run tests
+# Run tests (single run)
 npm test
+
+# Run tests (watch mode)
+npm run test:watch
 
 # Lint
 npm run lint

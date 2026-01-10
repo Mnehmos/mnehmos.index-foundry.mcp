@@ -8,7 +8,7 @@
 | **Primary Language** | TypeScript |
 | **Project Type** | MCP Server |
 | **Status** | Active |
-| **Last Updated** | 2025-12-29 |
+| **Last Updated** | 2026-01-10 |
 
 ## Overview
 
@@ -485,6 +485,101 @@ await client.callTool("indexfoundry_run_diff", {
 | tsx | ^4.19.2 | TypeScript execution for development |
 | typescript | ^5.7.2 | TypeScript compiler |
 | vitest | ^2.1.8 | Unit testing framework |
+
+## Operational Protocols
+
+### The Librarian Protocol: Active Data Curation
+
+**Reference:** [`ADR-007-LIBRARIAN-PROTOCOL.md`](./Docs/ADR-007-LIBRARIAN-PROTOCOL.md) | [`LIBRARIAN-EXAMPLES.md`](./Docs/LIBRARIAN-EXAMPLES.md)
+
+The **Librarian Protocol** is an operational workflow layer for IndexFoundry that adds **state verification** and **self-correction** capabilities. It is **not a new mode**—it is a documented protocol pattern that orchestrates IndexFoundry's existing tools in a deterministic, auditable manner.
+
+#### Key Principles
+
+1. **"Reason Over State"**: Always audit project manifest before querying or serving
+2. **Query Classification**: Determine if RAG retrieval is needed
+3. **Retrieval Validation**: Verify chunk quality before trusting results
+4. **Self-Correction**: Automatically repair poor retrieval through re-chunking or re-indexing
+5. **Deployment Safety**: Full pre-flight checks before exporting/serving
+
+#### Librarian Workflow
+
+```
+User Request → Manifest Audit → Query Classification → Retrieve →
+Validate Quality → [Valid: Return] OR [Invalid: Debug/Repair] → Final Response
+```
+
+#### Core Protocols
+
+| Protocol | Purpose | Tools Used |
+|----------|---------|-----------|
+| **State Check** | Verify project manifest, sources, chunks, vectors | `project_get` |
+| **Intent Classification** | Determine if query needs RAG | `classify_query` |
+| **Retrieval** | Search with adaptive mode | `project_query` |
+| **Quality Validation** | Check similarity scores | `debug_query` (if marginal) |
+| **Self-Repair** | Re-chunk, remove sources, rebuild | `project_remove_source`, `project_build` |
+| **Pre-Flight Checks** | Validate before deployment | `project_get`, `project_query` (test) |
+
+#### Example: Query with Full Audit
+
+```typescript
+// 1. Audit manifest (is index fresh?)
+const project = await indexfoundry_project_get({ project_id });
+
+// 2. Classify query (does it need RAG?)
+const classification = await indexfoundry_classify_query({ query });
+
+// 3. Retrieve (if needed)
+if (classification.needs_retrieval) {
+  const results = await indexfoundry_project_query({
+    project_id, query, mode: "hybrid"
+  });
+  
+  // 4. Validate scores (are they trustworthy?)
+  const avgScore = results.reduce((s) => s.score) / results.length;
+  if (avgScore < 0.65) {
+    // 5. Debug if low quality
+    const debug = await indexfoundry_debug_query({ query });
+    // Consider re-chunking or repair
+  }
+}
+
+// 6. Return answer with audit trail and metadata
+return { answer, audit: { checks, scores, sources } };
+```
+
+#### When to Use Librarian Patterns
+
+| Scenario | Pattern | Benefit |
+|----------|---------|---------|
+| Novice users | Use full Librarian workflow | Safe defaults, automatic repair |
+| Production deployments | Pre-flight checks | Validates index state before shipping |
+| Low retrieval scores | Debug + repair | Automatic quality improvement |
+| Long-running projects | Periodic state audit | Detects stale data, triggers rebuilds |
+| Multi-source projects | Batch management + repair | Handles failures gracefully |
+
+#### Example Projects Using Librarian Patterns
+
+- [`queryWithAudit()`](./Docs/LIBRARIAN-EXAMPLES.md#example-1-query-with-full-audit-trail) - Full query lifecycle with state validation
+- [`debugAndRepair()`](./Docs/LIBRARIAN-EXAMPLES.md#example-2-retrieval-debugging--re-chunking) - Auto-recovery for poor retrieval
+- [`deploymentPreFlight()`](./Docs/LIBRARIAN-EXAMPLES.md#example-3-deployment-pre-flight-check) - Pre-deployment validation
+- [`manageBatchSources()`](./Docs/LIBRARIAN-EXAMPLES.md#example-4-batch-source-management-with-repair) - Bulk operations with error recovery
+
+#### Score Thresholds
+
+| Metric | Threshold | Action |
+|--------|-----------|--------|
+| Min chunk score | 0.50 | Below = likely irrelevant |
+| Avg result score | 0.65 | Below = consider repair |
+| Classification confidence | 0.50 | Below = unclear intent |
+
+#### Documentation
+
+- **Full Specification**: [`ADR-007-LIBRARIAN-PROTOCOL.md`](./Docs/ADR-007-LIBRARIAN-PROTOCOL.md) - Complete protocol definition
+- **Workflow Examples**: [`LIBRARIAN-EXAMPLES.md`](./Docs/LIBRARIAN-EXAMPLES.md) - Step-by-step implementations
+- **Analysis**: [`MODE-COMPARISON-ANALYSIS.md`](./Docs/MODE-COMPARISON-ANALYSIS.md) - Design rationale
+
+---
 
 ## Integration Points
 

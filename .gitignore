@@ -34,3 +34,11 @@ projects/*/dist/
 # Temporary files
 *.tmp
 *.temp
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Screenshots (test artifacts)
+screenshots/
