@@ -42,3 +42,7 @@ projects/*/dist/
 
 # Screenshots (test artifacts)
 screenshots/
+
+# local project data (multi-GB) + per-user settings
+projects/
+.claude/settings.local.json

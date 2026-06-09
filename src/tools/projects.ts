@@ -19,7 +19,7 @@
 import path from "path";
 import { fileURLToPath } from "url";
 import { dirname as pathDirname } from "path";
-import { existsSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 
 // ESM __dirname equivalent
 const __filename = fileURLToPath(import.meta.url);
@@ -2948,7 +2948,6 @@ export function generateMcpServerSourceForTest(
  * (avoids async complexity in template generation)
  */
 function readJsonlSync<T>(filePath: string): T[] {
-  const { readFileSync } = require('fs');
   if (!existsSync(filePath)) return [];
   const content = readFileSync(filePath, 'utf-8').trim();
   if (!content) return [];
