@@ -699,7 +699,7 @@ Or manually create a repo at [github.com/new](https://github.com/new) and push.
 ### Step 2: Deploy to Railway
 
 1. Go to [railway.app/dashboard](https://railway.app/dashboard)
-2. Click **"New Project"** Ã¢â€ â€™ **"Deploy from GitHub repo"**
+2. Click **"New Project"** -> **"Deploy from GitHub repo"**
 3. Select your \`${serverName}\` repository
 4. Railway will auto-detect the Dockerfile
 
@@ -707,7 +707,7 @@ Or manually create a repo at [github.com/new](https://github.com/new) and push.
 
 ### Step 3: Configure Environment Variables
 
-In Railway dashboard Ã¢â€ â€™ your service Ã¢â€ â€™ **"Variables"** tab:
+In Railway dashboard -> your service -> **"Variables"** tab:
 
 | Variable | Value | Required |
 |----------|-------|----------|
@@ -721,7 +721,7 @@ In Railway dashboard Ã¢â€ â€™ your service Ã¢â€ â€™ **"Var
 
 ### Step 4: Get Your Public URL
 
-1. In Railway Ã¢â€ â€™ **"Settings"** Ã¢â€ â€™ **"Networking"**
+1. In Railway -> **"Settings"** -> **"Networking"**
 2. Click **"Generate Domain"**
 3. Copy your URL: \`https://${serverName}-production.up.railway.app\`
 
@@ -795,7 +795,7 @@ The project includes a ready-to-use chat interface in the \`frontend/\` director
 
 ### Option 1: GitHub Pages (Recommended for Static)
 1. Push your repo to GitHub
-2. Go to **Settings** Ã¢â€ â€™ **Pages**
+2. Go to **Settings** -> **Pages**
 3. Set Source to **Deploy from a branch**
 4. Select **main** branch and **\`/frontend\`** folder
 5. Your chat UI will be live at \`https://USERNAME.github.io/REPO-NAME/\`
