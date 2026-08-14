@@ -37,6 +37,98 @@ export interface ProjectQueryResult {
   mode: string;
 }
 
+interface ScoredQueryChunk {
+  chunk_id: string;
+  score: number;
+}
+
+function scoreKeywordMatches(chunks: ChunkRecord[], query: string): ScoredQueryChunk[] {
+  const queryTerms = query.toLowerCase().split(/\s+/);
+  return chunks.map(chunk => {
+    const text = chunk.text.toLowerCase();
+    const matches = queryTerms.filter(term => text.includes(term)).length;
+    return {
+      chunk_id: chunk.chunk_id,
+      score: matches / queryTerms.length,
+    };
+  });
+}
+
+function scoreSemanticMatches(
+  vectors: VectorRecord[],
+  queryVector: number[]
+): ScoredQueryChunk[] {
+  return vectors.map(vector => ({
+    chunk_id: vector.chunk_id,
+    score: cosineSimilarity(queryVector, vector.embedding),
+  }));
+}
+
+function combineHybridScores(
+  semanticScores: ScoredQueryChunk[],
+  keywordScores: ScoredQueryChunk[]
+): ScoredQueryChunk[] {
+  const keywordMap = new Map(keywordScores.map(item => [item.chunk_id, item.score]));
+  return semanticScores.map(item => ({
+    chunk_id: item.chunk_id,
+    score: item.score * 0.7 + (keywordMap.get(item.chunk_id) || 0) * 0.3,
+  }));
+}
+
+async function scoreQuery(
+  input: ProjectQueryInput,
+  manifest: ProjectManifest,
+  chunks: ChunkRecord[],
+  vectors: VectorRecord[]
+): Promise<ScoredQueryChunk[]> {
+  let semanticScores: ScoredQueryChunk[] = [];
+
+  if (input.mode === "semantic" || input.mode === "hybrid") {
+    const queryVector = await embedText(input.query, manifest.embedding_model);
+    semanticScores = scoreSemanticMatches(vectors, queryVector);
+  }
+
+  if (input.mode === "keyword") {
+    return scoreKeywordMatches(chunks, input.query);
+  }
+
+  if (input.mode === "hybrid") {
+    return combineHybridScores(
+      semanticScores,
+      scoreKeywordMatches(chunks, input.query)
+    );
+  }
+
+  return semanticScores;
+}
+
+function buildQueryResults(
+  scored: ScoredQueryChunk[],
+  chunks: ChunkRecord[],
+  input: ProjectQueryInput
+): ProjectQueryResult["results"] {
+  const chunkMap = new Map(chunks.map(chunk => [chunk.chunk_id, chunk]));
+  return scored
+    .sort((left, right) => right.score - left.score)
+    .slice(0, input.top_k)
+    .map(item => {
+      const chunk = chunkMap.get(item.chunk_id);
+      if (!chunk) return null;
+      if (input.filter_sources && !input.filter_sources.includes(chunk.source_id)) {
+        return null;
+      }
+
+      return {
+        chunk_id: item.chunk_id,
+        score: item.score,
+        text: chunk.text,
+        source_id: chunk.source_id,
+        metadata: chunk.metadata,
+      };
+    })
+    .filter((result): result is NonNullable<typeof result> => result !== null);
+}
+
 export async function projectQuery(input: ProjectQueryInput): Promise<ProjectQueryResult | ToolError> {
   const paths = getProjectPaths(input.project_id);
 
@@ -48,7 +140,6 @@ export async function projectQuery(input: ProjectQueryInput): Promise<ProjectQue
 
   try {
     const manifest = await readJson<ProjectManifest>(paths.manifest);
-
     if (!(await pathExists(paths.chunks)) || !(await pathExists(paths.vectors))) {
       return {
         success: true,
@@ -60,78 +151,11 @@ export async function projectQuery(input: ProjectQueryInput): Promise<ProjectQue
 
     const chunks = await readJsonl<ChunkRecord>(paths.chunks);
     const vectors = await readJsonl<VectorRecord>(paths.vectors);
-
-    // Build chunk lookup
-    const chunkMap = new Map(chunks.map(c => [c.chunk_id, c]));
-
-    // Only semantic and hybrid modes need a query embedding. Keyword mode is
-    // intentionally usable without an API key so local/offline projects can
-    // still be queried and tested.
-    let queryVector: number[] = [];
-    if (input.mode === "semantic" || input.mode === "hybrid") {
-      queryVector = await embedText(input.query, manifest.embedding_model);
-    }
-
-    // Score all vectors
-    let scored: Array<{ chunk_id: string; score: number }> = [];
-
-    if (input.mode === "semantic" || input.mode === "hybrid") {
-      scored = vectors.map(v => ({
-        chunk_id: v.chunk_id,
-        score: cosineSimilarity(queryVector, v.embedding),
-      }));
-    }
-
-    if (input.mode === "keyword" || input.mode === "hybrid") {
-      const queryTerms = input.query.toLowerCase().split(/\s+/);
-      const keywordScores = chunks.map(c => {
-        const text = c.text.toLowerCase();
-        let matches = 0;
-        for (const term of queryTerms) {
-          if (text.includes(term)) matches++;
-        }
-        return {
-          chunk_id: c.chunk_id,
-          score: matches / queryTerms.length,
-        };
-      });
-
-      if (input.mode === "keyword") {
-        scored = keywordScores;
-      } else {
-        // Hybrid: combine scores
-        const keywordMap = new Map(keywordScores.map(k => [k.chunk_id, k.score]));
-        scored = scored.map(s => ({
-          chunk_id: s.chunk_id,
-          score: s.score * 0.7 + (keywordMap.get(s.chunk_id) || 0) * 0.3,
-        }));
-      }
-    }
-
-    // Sort and take top_k
-    scored.sort((a, b) => b.score - a.score);
-    const topResults = scored.slice(0, input.top_k);
-
-    // Build results with chunk data
-    const results = topResults
-      .map(r => {
-        const chunk = chunkMap.get(r.chunk_id);
-        if (!chunk) return null;
-
-        // Apply filters
-        if (input.filter_sources && !input.filter_sources.includes(chunk.source_id)) {
-          return null;
-        }
-
-        return {
-          chunk_id: r.chunk_id,
-          score: r.score,
-          text: chunk.text,
-          source_id: chunk.source_id,
-          metadata: chunk.metadata,
-        };
-      })
-      .filter((r): r is NonNullable<typeof r> => r !== null);
+    const results = buildQueryResults(
+      await scoreQuery(input, manifest, chunks, vectors),
+      chunks,
+      input
+    );
 
     return {
       success: true,

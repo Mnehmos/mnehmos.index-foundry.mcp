@@ -44,19 +44,19 @@ export interface ProjectExportResult {
 
 export async function projectExport(input: ProjectExportInput): Promise<ProjectExportResult | ToolError> {
   const paths = getProjectPaths(input.project_id);
-  
+
   if (!(await pathExists(paths.manifest))) {
     return createToolError("NOT_FOUND", `Project '${input.project_id}' not found`, {
       recoverable: false,
     });
   }
-  
+
   try {
     const manifest = await readJson<ProjectManifest>(paths.manifest);
-    
+
     const serverName = input.server_name || input.project_id;
     const serverDesc = input.server_description || manifest.description || `RAG search server for ${manifest.name}`;
-    
+
     const files = await generateDeploymentFiles(input.project_id, manifest, {
       serverName,
       serverDescription: serverDesc,
@@ -64,7 +64,7 @@ export async function projectExport(input: ProjectExportInput): Promise<ProjectE
       includeHttp: input.include_http,
       railwayConfig: input.railway_config,
     });
-    
+
     return {
       success: true,
       project_id: input.project_id,
@@ -91,102 +91,92 @@ export interface ProjectDeployResult {
   message: string;
 }
 
-export async function projectDeploy(input: ProjectDeployInput): Promise<ProjectDeployResult | ToolError> {
-  const paths = getProjectPaths(input.project_id);
-  
+async function validateDeploymentInput(
+  input: ProjectDeployInput,
+  paths: ReturnType<typeof getProjectPaths>
+): Promise<ToolError | null> {
   if (!(await pathExists(paths.manifest))) {
     return createToolError("NOT_FOUND", `Project '${input.project_id}' not found`, {
       recoverable: false,
     });
   }
-  
-  // Check if project has been exported (has src/index.ts)
-  const serverPath = path.join(paths.src, "index.ts");
-  if (!(await pathExists(serverPath))) {
-    return createToolError("NOT_EXPORTED", `Project '${input.project_id}' has not been exported. Run project_export first.`, {
-      recoverable: true,
-    });
+
+  if (!(await pathExists(path.join(paths.src, "index.ts")))) {
+    return createToolError(
+      "NOT_EXPORTED",
+      `Project '${input.project_id}' has not been exported. Run project_export first.`,
+      { recoverable: true }
+    );
   }
-  
-  // Reject env var names that aren't plain identifiers before doing anything else.
-  if (input.env_vars) {
-    for (const key of Object.keys(input.env_vars)) {
-      if (!isValidEnvVarName(key)) {
-        return createToolError("INVALID_ENV_VAR", `Invalid environment variable name: '${key}'. Must match [A-Za-z_][A-Za-z0-9_]*`, {
-          recoverable: false,
-        });
-      }
+
+  for (const key of Object.keys(input.env_vars || {})) {
+    if (!isValidEnvVarName(key)) {
+      return createToolError(
+        "INVALID_ENV_VAR",
+        `Invalid environment variable name: '${key}'. Must match [A-Za-z_][A-Za-z0-9_]*`,
+        { recoverable: false }
+      );
     }
   }
 
-  const commands: string[] = [];
+  return null;
+}
 
-  // Change to project directory
-  commands.push(`cd ${paths.root}`);
+function buildDeploymentCommands(
+  paths: ReturnType<typeof getProjectPaths>,
+  envVars?: Record<string, string>
+): string[] {
+  const commands = [`cd ${paths.root}`, "railway init"];
 
-  // Initialize Railway project
-  commands.push("railway init");
-
-  // Set environment variables
-  if (input.env_vars) {
-    for (const [key, value] of Object.entries(input.env_vars)) {
-      // Mask sensitive values in the command list
-      const displayValue = key.includes("KEY") || key.includes("SECRET") || key.includes("TOKEN")
+  for (const [key, value] of Object.entries(envVars || {})) {
+    const displayValue =
+      key.includes("KEY") || key.includes("SECRET") || key.includes("TOKEN")
         ? "***"
         : value;
-      commands.push(`railway variables set ${key}=${displayValue}`);
+    commands.push(`railway variables set ${key}=${displayValue}`);
+  }
+
+  commands.push("railway up", "railway domain");
+  return commands;
+}
+
+async function setRailwayVariables(
+  paths: ReturnType<typeof getProjectPaths>,
+  envVars: Record<string, string> | undefined,
+  executedCommands: string[]
+): Promise<ToolError | null> {
+  for (const [key, value] of Object.entries(envVars || {})) {
+    try {
+      await runCommand("railway", ["variables", "set", `${key}=${value}`], {
+        cwd: paths.root,
+      });
+      executedCommands.push(`railway variables set ${key}=***`);
+    } catch (err) {
+      return createToolError("ENV_VAR_FAILED", `Failed to set ${key}: ${err}`, {
+        recoverable: true,
+      });
     }
   }
+  return null;
+}
 
-  // Deploy
-  commands.push("railway up");
-
-  // Get deployment URL
-  commands.push("railway domain");
-
-  if (input.dry_run) {
-    return {
-      success: true,
-      project_id: input.project_id,
-      platform: "railway",
-      commands,
-      message: `Dry run complete. Would execute ${commands.length} Railway CLI commands. Ensure Railway CLI is installed (npm i -g @railway/cli) and you are logged in (railway login).`,
-    };
-  }
-  
-  // Execute actual commands
+async function executeRailwayDeployment(
+  input: ProjectDeployInput,
+  paths: ReturnType<typeof getProjectPaths>
+): Promise<ProjectDeployResult | ToolError> {
   try {
     const executedCommands: string[] = [];
 
-    // Initialize Railway
     try {
       await runCommand("railway", ["init"], { cwd: paths.root });
       executedCommands.push("railway init");
     } catch {
-      // May fail if already initialized, which is fine
       executedCommands.push("railway init (skipped - may already be initialized)");
     }
 
-    // Set environment variables.
-    //
-    // The Railway CLI only accepts variables as KEY=VALUE on the command line,
-    // so secret values are unavoidably visible in this machine's process table
-    // for the duration of the call. Names are validated above and everything is
-    // passed as argv, so the value itself never reaches a shell.
-    if (input.env_vars) {
-      for (const [key, value] of Object.entries(input.env_vars)) {
-        try {
-          await runCommand("railway", ["variables", "set", `${key}=${value}`], { cwd: paths.root });
-          executedCommands.push(`railway variables set ${key}=***`);
-        } catch (err) {
-          return createToolError("ENV_VAR_FAILED", `Failed to set ${key}: ${err}`, {
-            recoverable: true,
-          });
-        }
-      }
-    }
+    const envError = await setRailwayVariables(paths, input.env_vars, executedCommands);
+    if (envError) return envError;
 
-    // Deploy
     try {
       await runCommand("railway", ["up"], { cwd: paths.root });
       executedCommands.push("railway up");
@@ -196,11 +186,10 @@ export async function projectDeploy(input: ProjectDeployInput): Promise<ProjectD
       });
     }
 
-    // Get domain
     let domain = "";
     try {
-      const { stdout } = await runCommand("railway", ["domain"], { cwd: paths.root });
-      domain = stdout.trim();
+      const result = await runCommand("railway", ["domain"], { cwd: paths.root });
+      domain = result.stdout.trim();
       executedCommands.push("railway domain");
     } catch {
       domain = "(domain not yet assigned - check Railway dashboard)";
@@ -213,12 +202,32 @@ export async function projectDeploy(input: ProjectDeployInput): Promise<ProjectD
       commands: executedCommands,
       message: `Deployed to Railway! Domain: ${domain}`,
     };
-    
   } catch (err) {
-    return createToolError("DEPLOY_FAILED", `Deployment failed: ${err}. Ensure Railway CLI is installed and you are logged in.`, {
-      recoverable: true,
-    });
+    return createToolError(
+      "DEPLOY_FAILED",
+      `Deployment failed: ${err}. Ensure Railway CLI is installed and you are logged in.`,
+      { recoverable: true }
+    );
   }
+}
+
+export async function projectDeploy(input: ProjectDeployInput): Promise<ProjectDeployResult | ToolError> {
+  const paths = getProjectPaths(input.project_id);
+  const validationError = await validateDeploymentInput(input, paths);
+  if (validationError) return validationError;
+
+  const commands = buildDeploymentCommands(paths, input.env_vars);
+  if (input.dry_run) {
+    return {
+      success: true,
+      project_id: input.project_id,
+      platform: "railway",
+      commands,
+      message: `Dry run complete. Would execute ${commands.length} Railway CLI commands. Ensure Railway CLI is installed (npm i -g @railway/cli) and you are logged in (railway login).`,
+    };
+  }
+
+  return executeRailwayDeployment(input, paths);
 }
 
 // ============================================================================
@@ -246,21 +255,21 @@ function readJsonlSync<T>(filePath: string): T[] {
 function generateExampleQuestions(projectId: string): string[] {
   const paths = getProjectPaths(projectId);
   const questions: string[] = [];
-  
+
   try {
     // Try to read chunks for headings
     if (existsSync(paths.chunks)) {
       const chunks = readJsonlSync<ChunkRecord>(paths.chunks);
-      
+
       // Strategy 1: Extract from headings in metadata
       const headings = chunks
         .filter(c => c.metadata?.heading && typeof c.metadata.heading === 'string')
         .map(c => c.metadata.heading as string)
         .filter(h => h.length > 3 && h.length < 50);
-      
+
       const uniqueHeadings = [...new Set(headings)].slice(0, 2);
       questions.push(...uniqueHeadings.map(h => `What is ${h}?`));
-      
+
       // Strategy 2: Extract key topics from first chunks
       if (questions.length < 4 && chunks.length > 0) {
         const firstChunk = chunks[0].text.slice(0, 200);
@@ -271,7 +280,7 @@ function generateExampleQuestions(projectId: string): string[] {
         }
       }
     }
-    
+
     // Strategy 3: Use source names
     if (questions.length < 4 && existsSync(paths.sources)) {
       const sources = readJsonlSync<SourceRecord>(paths.sources);
@@ -281,11 +290,11 @@ function generateExampleQuestions(projectId: string): string[] {
         .slice(0, 2);
       questions.push(...sourceNames.map(n => `Tell me about ${n}`));
     }
-    
+
   } catch (err) {
     console.error('Error generating example questions:', err);
   }
-  
+
   // Fallback generic questions
   const fallbacks = [
     "What are the main topics covered?",
@@ -293,11 +302,11 @@ function generateExampleQuestions(projectId: string): string[] {
     "What should I know first?",
     "Summarize the key points"
   ];
-  
+
   while (questions.length < 4) {
     questions.push(fallbacks[questions.length]);
   }
-  
+
   return questions.slice(0, 4);
 }
 
@@ -395,11 +404,11 @@ export async function generateDeploymentFiles(
 ): Promise<string[]> {
   const paths = getProjectPaths(projectId);
   const files: string[] = [];
-  
+
   const serverName = options?.serverName || projectId;
   const serverDesc = options?.serverDescription || manifest.description || `RAG server for ${manifest.name}`;
   const port = options?.port || 8080;
-  
+
   // .gitignore
   await writeFile(path.join(paths.root, ".gitignore"), `
 node_modules/
@@ -416,7 +425,7 @@ runs/
 frontend/local.config.js
 `);
   files.push(".gitignore");
-  
+
   // package.json
   await writeFile(path.join(paths.root, "package.json"), JSON.stringify({
     name: serverName,
@@ -442,7 +451,7 @@ frontend/local.config.js
     }
   }, null, 2));
   files.push("package.json");
-  
+
   // tsconfig.json
   await writeFile(path.join(paths.root, "tsconfig.json"), JSON.stringify({
     compilerOptions: {
@@ -459,7 +468,7 @@ frontend/local.config.js
     include: ["src/**/*"]
   }, null, 2));
   files.push("tsconfig.json");
-  
+
   // Dockerfile - multi-stage build
   await writeFile(path.join(paths.root, "Dockerfile"), `# Build stage
 FROM node:20-slim AS builder
@@ -503,7 +512,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \\
 CMD ["node", "dist/index.js"]
 `);
   files.push("Dockerfile");
-  
+
   // railway.toml
   if (options?.railwayConfig !== false) {
     await writeFile(path.join(paths.root, "railway.toml"), `[build]
@@ -607,7 +616,7 @@ Add to your MCP client config:
 *Generated by IndexFoundry*
 `);
   files.push("README.md");
-  
+
   // DEPLOYMENT.md - Step-by-step deployment guide
   await writeFile(path.join(paths.root, "DEPLOYMENT.md"), `# Deployment Guide for ${manifest.name}
 
@@ -689,7 +698,7 @@ Or manually create a repo at [github.com/new](https://github.com/new) and push.
 ### Step 2: Deploy to Railway
 
 1. Go to [railway.app/dashboard](https://railway.app/dashboard)
-2. Click **"New Project"** â†’ **"Deploy from GitHub repo"**
+2. Click **"New Project"** Ã¢â€ â€™ **"Deploy from GitHub repo"**
 3. Select your \`${serverName}\` repository
 4. Railway will auto-detect the Dockerfile
 
@@ -697,21 +706,21 @@ Or manually create a repo at [github.com/new](https://github.com/new) and push.
 
 ### Step 3: Configure Environment Variables
 
-In Railway dashboard â†’ your service â†’ **"Variables"** tab:
+In Railway dashboard Ã¢â€ â€™ your service Ã¢â€ â€™ **"Variables"** tab:
 
 | Variable | Value | Required |
 |----------|-------|----------|
-| \`OPENAI_API_KEY\` | \`sk-proj-...\` | âœ… Yes |
-| \`PORT\` | \`${port}\` | âŒ Auto-set |
-| \`OPENAI_MODEL\` | \`gpt-5-nano-2025-08-07\` | âŒ Optional |
+| \`OPENAI_API_KEY\` | \`sk-proj-...\` | Ã¢Å“â€¦ Yes |
+| \`PORT\` | \`${port}\` | Ã¢ÂÅ’ Auto-set |
+| \`OPENAI_MODEL\` | \`gpt-5-nano-2025-08-07\` | Ã¢ÂÅ’ Optional |
 
-> âš ï¸ **Never commit API keys to Git!**
+> Ã¢Å¡ Ã¯Â¸Â **Never commit API keys to Git!**
 
 ---
 
 ### Step 4: Get Your Public URL
 
-1. In Railway â†’ **"Settings"** â†’ **"Networking"**
+1. In Railway Ã¢â€ â€™ **"Settings"** Ã¢â€ â€™ **"Networking"**
 2. Click **"Generate Domain"**
 3. Copy your URL: \`https://${serverName}-production.up.railway.app\`
 
@@ -785,7 +794,7 @@ The project includes a ready-to-use chat interface in the \`frontend/\` director
 
 ### Option 1: GitHub Pages (Recommended for Static)
 1. Push your repo to GitHub
-2. Go to **Settings** â†’ **Pages**
+2. Go to **Settings** Ã¢â€ â€™ **Pages**
 3. Set Source to **Deploy from a branch**
 4. Select **main** branch and **\`/frontend\`** folder
 5. Your chat UI will be live at \`https://USERNAME.github.io/REPO-NAME/\`
@@ -805,7 +814,7 @@ Upload the contents of \`frontend/\` to:
 *Generated by IndexFoundry*
 `);
   files.push("DEPLOYMENT.md");
-  
+
   // MCP Server source - copied verbatim from the compiled template
   for (const fileName of SERVER_TEMPLATE_FILES) {
     await writeFile(path.join(paths.src, fileName), readServerTemplate(fileName));
@@ -845,7 +854,7 @@ OPENAI_MODEL=gpt-5-nano-2025-08-07
 NODE_ENV=development
 `);
   files.push(".env");
-  
+
   // .dockerignore - reduces Docker context size
   await writeFile(path.join(paths.root, ".dockerignore"), `node_modules
 .git
@@ -859,22 +868,22 @@ runs/
 .DS_Store
 `);
   files.push(".dockerignore");
-  
+
   // Frontend - Chat UI
   if (options?.includeFrontend !== false) {
     const frontendDir = path.join(paths.root, 'frontend');
     await ensureDir(frontendDir);
-    
+
     // Generate example questions from indexed content
     const examples = generateExampleQuestions(projectId);
-    
+
     // Compute RAG server URL for production
     const ragServerUrl = `https://${serverName}-production.up.railway.app`;
-    
+
     // Read and process chat template
     const templatePath = path.join(TEMPLATES_DIR, 'chat.html');
     let chatHtml: string;
-    
+
     try {
       const { readFileSync } = await import('fs');
       chatHtml = readFileSync(templatePath, 'utf-8');
@@ -882,7 +891,7 @@ runs/
       // Fallback: generate minimal template if file not found
       chatHtml = generateMinimalChatHtml();
     }
-    
+
     // Replace template variables
     chatHtml = chatHtml
       .replace(/\{\{PROJECT_NAME\}\}/g, manifest.name)
@@ -891,10 +900,10 @@ runs/
       .replace(/\{\{EXAMPLE_2\}\}/g, examples[1] || 'Give me an overview')
       .replace(/\{\{EXAMPLE_3\}\}/g, examples[2] || 'What should I know first?')
       .replace(/\{\{EXAMPLE_4\}\}/g, examples[3] || 'Summarize the key points');
-    
+
     await writeFile(path.join(frontendDir, 'index.html'), chatHtml);
     files.push('frontend/index.html');
-    
+
     // local.config.js.example for development
     await writeFile(path.join(frontendDir, 'local.config.js.example'), `// Local development configuration
 // Copy this file to local.config.js and edit the RAG_SERVER URL
@@ -904,7 +913,7 @@ window.LOCAL_CONFIG = {
 };
 `);
     files.push('frontend/local.config.js.example');
-    
+
     // Also create local.config.js for immediate local development use
     await writeFile(path.join(frontendDir, 'local.config.js'), `// Local development configuration (auto-generated)
 // Edit RAG_SERVER URL if running on a different port
@@ -915,7 +924,7 @@ window.LOCAL_CONFIG = {
 `);
     files.push('frontend/local.config.js');
   }
-  
+
   return files;
 }
 

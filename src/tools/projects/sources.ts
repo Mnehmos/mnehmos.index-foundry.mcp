@@ -264,23 +264,38 @@ export interface RemoveSourceResult {
   message: string;
 }
 
-export async function projectRemoveSource(input: ProjectRemoveSourceInput): Promise<RemoveSourceResult | ToolError> {
-  const paths = getProjectPaths(input.project_id);
+type RemovalTarget = {
+  source_id?: string;
+  source_uri?: string;
+};
 
-  // Apply defaults for cascade options (schema defaults are: remove_chunks=true, remove_vectors=true, confirm=false)
-  const removeChunks = input.remove_chunks ?? true;
-  const removeVectors = input.remove_vectors ?? true;
-  const confirm = input.confirm ?? false;
+interface RemovalSelection {
+  success: true;
+  removed: RemoveSourceResult["removed"];
+  notFound: string[];
+  sourceIdsToRemove: string[];
+}
 
-  if (!(await pathExists(paths.manifest))) {
-    return createToolError("NOT_FOUND", `Project '${input.project_id}' not found`, {
-      recoverable: false,
-    });
+async function readWithRetry<T>(filePath: string, maxRetries = 3): Promise<T[]> {
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      if (!(await pathExists(filePath))) return [];
+      return await readJsonl<T>(filePath);
+    } catch {
+      if (attempt === maxRetries - 1) return [];
+      await new Promise(resolve => setTimeout(resolve, 10 * (attempt + 1)));
+    }
   }
+  return [];
+}
 
-  // Determine what to remove
+function validateRemovalInput(
+  input: ProjectRemoveSourceInput,
+  removeChunks: boolean,
+  removeVectors: boolean
+): ToolError | null {
   const hasSingleSource = Boolean(input.source_id || input.source_uri);
-  const hasBatch = input.batch && input.batch.length > 0;
+  const hasBatch = Boolean(input.batch && input.batch.length > 0);
 
   if (!hasSingleSource && !hasBatch) {
     return createToolError("NO_SOURCE", "Must provide source_id, source_uri, OR batch array", {
@@ -288,180 +303,213 @@ export async function projectRemoveSource(input: ProjectRemoveSourceInput): Prom
     });
   }
 
-  // Check confirmation for cascade deletion
-  const needsConfirmation = removeChunks || removeVectors;
-  if (needsConfirmation && !confirm) {
-    return createToolError("CONFIRMATION_REQUIRED", "Set confirm: true to remove source and associated chunks/vectors", {
-      recoverable: true,
+  if ((removeChunks || removeVectors) && !input.confirm) {
+    return createToolError(
+      "CONFIRMATION_REQUIRED",
+      "Set confirm: true to remove source and associated chunks/vectors",
+      { recoverable: true }
+    );
+  }
+
+  return null;
+}
+
+function getRemovalTargets(input: ProjectRemoveSourceInput): RemovalTarget[] {
+  const targets: RemovalTarget[] = [];
+
+  if (input.source_id || input.source_uri) {
+    targets.push({ source_id: input.source_id, source_uri: input.source_uri });
+  }
+
+  if (input.batch && input.batch.length > 0) {
+    targets.push(...input.batch);
+  }
+
+  return targets;
+}
+
+function selectSourcesForRemoval(
+  existingSources: SourceRecord[],
+  targets: RemovalTarget[]
+): RemovalSelection | ToolError {
+  const removed: RemovalSelection["removed"] = [];
+  const notFound: string[] = [];
+  const sourceIdsToRemove: string[] = [];
+
+  for (const target of targets) {
+    const source = existingSources.find(candidate =>
+      (target.source_id && candidate.source_id === target.source_id) ||
+      (target.source_uri && candidate.uri === target.source_uri)
+    );
+    const identifier = target.source_id || target.source_uri || "unknown";
+
+    if (!source) {
+      notFound.push(identifier);
+      continue;
+    }
+
+    if (source.status === "processing") {
+      return createToolError(
+        "SOURCE_PROCESSING",
+        `Cannot remove source '${source.source_id}' while it is being processed`,
+        { recoverable: true }
+      );
+    }
+
+    sourceIdsToRemove.push(source.source_id);
+    removed.push({
+      source_id: source.source_id,
+      uri: source.uri,
+      chunks_removed: 0,
+      vectors_removed: 0,
     });
   }
 
-  // Helper for reading with retry (handles concurrent access)
-  async function readWithRetry<T>(filePath: string, maxRetries = 3): Promise<T[]> {
-    for (let i = 0; i < maxRetries; i++) {
-      try {
-        if (!(await pathExists(filePath))) return [];
-        return await readJsonl<T>(filePath);
-      } catch (err) {
-        if (i === maxRetries - 1) return []; // Return empty on final failure instead of throwing
-        await new Promise(resolve => setTimeout(resolve, 10 * (i + 1)));
+  return { success: true, removed, notFound, sourceIdsToRemove };
+}
+
+function incrementRemovalCount(
+  removed: RemoveSourceResult["removed"],
+  sourceId: string,
+  field: "chunks_removed" | "vectors_removed"
+): void {
+  const entry = removed.find(item => item.source_id === sourceId);
+  if (entry) entry[field]++;
+}
+
+async function removeCascadeData(
+  paths: ReturnType<typeof getProjectPaths>,
+  sourceIdsToRemove: string[],
+  removed: RemoveSourceResult["removed"],
+  removeChunks: boolean,
+  removeVectors: boolean
+): Promise<void> {
+  if (sourceIdsToRemove.length === 0 || (!removeChunks && !removeVectors)) return;
+
+  const sourceIdSet = new Set(sourceIdsToRemove);
+  const chunkIdsToRemove = new Set<string>();
+  const chunkToSourceMap = new Map<string, string>();
+
+  if (await pathExists(paths.chunks)) {
+    const existingChunks = await readJsonl<ChunkRecord>(paths.chunks);
+
+    for (const chunk of existingChunks) {
+      if (sourceIdSet.has(chunk.source_id)) {
+        chunkIdsToRemove.add(chunk.chunk_id);
+        chunkToSourceMap.set(chunk.chunk_id, chunk.source_id);
       }
     }
-    return [];
+
+    if (removeChunks) {
+      const remainingChunks = existingChunks.filter(chunk => {
+        if (!sourceIdSet.has(chunk.source_id)) return true;
+        incrementRemovalCount(removed, chunk.source_id, "chunks_removed");
+        return false;
+      });
+      await writeJsonl(paths.chunks, remainingChunks);
+    }
   }
+
+  if (removeVectors && await pathExists(paths.vectors)) {
+    const existingVectors = await readJsonl<VectorRecord>(paths.vectors);
+    const remainingVectors = existingVectors.filter(vector => {
+      const sourceId = chunkToSourceMap.get(vector.chunk_id);
+      if (!sourceId || !chunkIdsToRemove.has(vector.chunk_id)) return true;
+      incrementRemovalCount(removed, sourceId, "vectors_removed");
+      return false;
+    });
+    await writeJsonl(paths.vectors, remainingVectors);
+  }
+}
+
+async function persistSourceRemoval(
+  paths: ReturnType<typeof getProjectPaths>,
+  existingSources: SourceRecord[],
+  sourceIdsToRemove: string[],
+  removeChunks: boolean,
+  removeVectors: boolean
+): Promise<void> {
+  const sourceIdSet = new Set(sourceIdsToRemove);
+  const remainingSources = existingSources.filter(source => !sourceIdSet.has(source.source_id));
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await writeJsonl(paths.sources, remainingSources);
+      break;
+    } catch (err) {
+      if (attempt === 2) throw err;
+      await new Promise(resolve => setTimeout(resolve, 10 * (attempt + 1)));
+    }
+  }
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const manifest = await readJson<ProjectManifest>(paths.manifest);
+      manifest.stats.sources_count = remainingSources.length;
+
+      if (removeChunks && await pathExists(paths.chunks)) {
+        manifest.stats.chunks_count = (await readJsonl<ChunkRecord>(paths.chunks)).length;
+      }
+      if (removeVectors && await pathExists(paths.vectors)) {
+        manifest.stats.vectors_count = (await readJsonl<VectorRecord>(paths.vectors)).length;
+      }
+
+      manifest.updated_at = now();
+      await writeJson(paths.manifest, manifest);
+      break;
+    } catch (err) {
+      if (attempt === 2) throw err;
+      await new Promise(resolve => setTimeout(resolve, 10 * (attempt + 1)));
+    }
+  }
+}
+
+export async function projectRemoveSource(input: ProjectRemoveSourceInput): Promise<RemoveSourceResult | ToolError> {
+  const paths = getProjectPaths(input.project_id);
+  const removeChunks = input.remove_chunks ?? true;
+  const removeVectors = input.remove_vectors ?? true;
+
+  if (!(await pathExists(paths.manifest))) {
+    return createToolError("NOT_FOUND", `Project '${input.project_id}' not found`, {
+      recoverable: false,
+    });
+  }
+
+  const validationError = validateRemovalInput(input, removeChunks, removeVectors);
+  if (validationError) return validationError;
 
   try {
     const existingSources = await readWithRetry<SourceRecord>(paths.sources);
+    const selection = selectSourcesForRemoval(existingSources, getRemovalTargets(input));
+    if (!selection.success) return selection;
 
-    // Build list of sources to find
-    const toFind: Array<{ source_id?: string; source_uri?: string }> = [];
-    if (hasSingleSource) {
-      toFind.push({ source_id: input.source_id, source_uri: input.source_uri });
-    }
-    if (hasBatch) {
-      toFind.push(...input.batch!);
-    }
+    await removeCascadeData(
+      paths,
+      selection.sourceIdsToRemove,
+      selection.removed,
+      removeChunks,
+      removeVectors
+    );
 
-    const removed: RemoveSourceResult["removed"] = [];
-    const notFound: string[] = [];
-    const sourceIdsToRemove: string[] = [];
-
-    // Find matching sources
-    for (const item of toFind) {
-      const source = existingSources.find(s =>
-        (item.source_id && s.source_id === item.source_id) ||
-        (item.source_uri && s.uri === item.source_uri)
+    if (selection.sourceIdsToRemove.length > 0) {
+      await persistSourceRemoval(
+        paths,
+        existingSources,
+        selection.sourceIdsToRemove,
+        removeChunks,
+        removeVectors
       );
-
-      const identifier = item.source_id || item.source_uri || "unknown";
-
-      if (!source) {
-        notFound.push(identifier);
-        continue;
-      }
-
-      // Check if source is currently processing
-      if (source.status === "processing") {
-        return createToolError("SOURCE_PROCESSING", `Cannot remove source '${source.source_id}' while it is being processed`, {
-          recoverable: true,
-        });
-      }
-
-      sourceIdsToRemove.push(source.source_id);
-      removed.push({
-        source_id: source.source_id,
-        uri: source.uri,
-        chunks_removed: 0,
-        vectors_removed: 0,
-      });
     }
 
-    // Cascade delete chunks and vectors if requested
-    if (sourceIdsToRemove.length > 0 && (removeChunks || removeVectors)) {
-      const sourceIdSet = new Set(sourceIdsToRemove);
-
-      // Build mapping of chunk_id -> source_id for vector removal
-      const chunkToSourceMap = new Map<string, string>();
-      const chunkIdsToRemove = new Set<string>();
-
-      // First pass: identify chunks to remove
-      if (await pathExists(paths.chunks)) {
-        const existingChunks = await readJsonl<ChunkRecord>(paths.chunks);
-
-        for (const chunk of existingChunks) {
-          if (sourceIdSet.has(chunk.source_id)) {
-            chunkIdsToRemove.add(chunk.chunk_id);
-            chunkToSourceMap.set(chunk.chunk_id, chunk.source_id);
-          }
-        }
-
-        // Remove chunks if requested
-        if (removeChunks) {
-          const remainingChunks: ChunkRecord[] = [];
-          for (const chunk of existingChunks) {
-            if (sourceIdSet.has(chunk.source_id)) {
-              const entry = removed.find(r => r.source_id === chunk.source_id);
-              if (entry) entry.chunks_removed++;
-            } else {
-              remainingChunks.push(chunk);
-            }
-          }
-          await writeJsonl(paths.chunks, remainingChunks);
-        }
-      }
-
-      // Remove vectors for chunks from removed sources
-      if (removeVectors && await pathExists(paths.vectors)) {
-        const existingVectors = await readJsonl<VectorRecord>(paths.vectors);
-        const remainingVectors: VectorRecord[] = [];
-
-        for (const vector of existingVectors) {
-          if (chunkIdsToRemove.has(vector.chunk_id)) {
-            const sourceId = chunkToSourceMap.get(vector.chunk_id);
-            if (sourceId) {
-              const entry = removed.find(r => r.source_id === sourceId);
-              if (entry) entry.vectors_removed++;
-            }
-          } else {
-            remainingVectors.push(vector);
-          }
-        }
-
-        await writeJsonl(paths.vectors, remainingVectors);
-      }
-    }
-
-    // Remove sources from sources.jsonl
-    if (sourceIdsToRemove.length > 0) {
-      const sourceIdSet = new Set(sourceIdsToRemove);
-      const remainingSources = existingSources.filter(s => !sourceIdSet.has(s.source_id));
-
-      // Write with retry for concurrent access
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          await writeJsonl(paths.sources, remainingSources);
-          break;
-        } catch (err) {
-          if (attempt === 2) throw err;
-          await new Promise(resolve => setTimeout(resolve, 10 * (attempt + 1)));
-        }
-      }
-
-      // Update manifest stats with retry
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          const manifest = await readJson<ProjectManifest>(paths.manifest);
-          manifest.stats.sources_count = remainingSources.length;
-
-          // Recalculate chunk and vector counts if we removed them
-          if (removeChunks && await pathExists(paths.chunks)) {
-            const remainingChunks = await readJsonl<ChunkRecord>(paths.chunks);
-            manifest.stats.chunks_count = remainingChunks.length;
-          }
-          if (removeVectors && await pathExists(paths.vectors)) {
-            const remainingVectors = await readJsonl<VectorRecord>(paths.vectors);
-            manifest.stats.vectors_count = remainingVectors.length;
-          }
-
-          manifest.updated_at = now();
-          await writeJson(paths.manifest, manifest);
-          break;
-        } catch (err) {
-          if (attempt === 2) throw err;
-          await new Promise(resolve => setTimeout(resolve, 10 * (attempt + 1)));
-        }
-      }
-    }
-
-    const totalChunks = removed.reduce((sum, r) => sum + r.chunks_removed, 0);
-    const totalVectors = removed.reduce((sum, r) => sum + r.vectors_removed, 0);
+    const totalChunks = selection.removed.reduce((sum, item) => sum + item.chunks_removed, 0);
+    const totalVectors = selection.removed.reduce((sum, item) => sum + item.vectors_removed, 0);
 
     return {
       success: true,
       project_id: input.project_id,
-      removed,
-      not_found: notFound,
-      message: `Removed ${removed.length} source(s), ${totalChunks} chunks, ${totalVectors} vectors. ${notFound.length} not found.`,
+      removed: selection.removed,
+      not_found: selection.notFound,
+      message: `Removed ${selection.removed.length} source(s), ${totalChunks} chunks, ${totalVectors} vectors. ${selection.notFound.length} not found.`,
     };
   } catch (err) {
     return createToolError("REMOVE_FAILED", `Failed to remove sources: ${err}`, {

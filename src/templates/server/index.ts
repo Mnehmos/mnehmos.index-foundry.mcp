@@ -487,10 +487,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 // HTTP Server
 // ============================================================================
 
-function startHttpServer(): void {
-  const app = express();
-  app.use(express.json({ limit: "1mb" }));
-
+function registerRequestMiddleware(app: express.Express): void {
   // Request logging
   app.use((req, res, next) => {
     const start = Date.now();
@@ -511,7 +508,9 @@ function startHttpServer(): void {
     }
     next();
   });
+}
 
+function registerHealthRoute(app: express.Express): void {
   // Health check endpoint
   app.get("/health", (_, res) => {
     res.json({
@@ -523,7 +522,9 @@ function startHttpServer(): void {
       uptime: Math.floor(process.uptime()),
     });
   });
+}
 
+function registerStatsRoute(app: express.Express): void {
   // Stats endpoint
   app.get("/stats", (_, res) => {
     res.json({
@@ -536,7 +537,9 @@ function startHttpServer(): void {
       embedding_model: embeddingModel.model_name,
     });
   });
+}
 
+function registerSourcesRoute(app: express.Express): void {
   // List sources endpoint
   app.get("/sources", (_, res) => {
     res.json({
@@ -550,7 +553,9 @@ function startHttpServer(): void {
       total: sources.length,
     });
   });
+}
 
+function registerSearchRoute(app: express.Express): void {
   // Search endpoint
   app.post("/search", async (req, res) => {
     try {
@@ -585,7 +590,9 @@ function startHttpServer(): void {
       res.status(500).json({ error: "Search failed" });
     }
   });
+}
 
+function registerChunkRoute(app: express.Express): void {
   // Get chunk by ID
   app.get("/chunks/:chunk_id", (req, res) => {
     const chunk = searchContext.chunkMap.get(req.params.chunk_id);
@@ -594,8 +601,112 @@ function startHttpServer(): void {
     }
     res.json(enrichWithSource(chunk, 1.0));
   });
+}
 
-  // Chat endpoint - RAG + LLM with streaming
+function buildConversationHistory(messages: Message[] | null = []): string {
+  const recentMessages = (messages || []).slice(-10);
+  if (recentMessages.length === 0) return "";
+
+  return `\\n\\nCONVERSATION HISTORY:\\n${recentMessages
+    .map(message => `${message.role === "user" ? "User" : "Assistant"}: ${message.content}`)
+    .join("\\n")}`;
+}
+
+function buildRetrievedContext(searchResults: ScoredChunk[]): string {
+  return searchResults
+    .map((result, index) => {
+      const source = sourceMap.get(result.chunk.source_id);
+      const sourceName = source?.source_name || source?.uri || "Unknown";
+      return `[Source ${index + 1}: ${sourceName}]\\n${result.chunk.text}`;
+    })
+    .join("\\n\\n---\\n\\n");
+}
+
+function buildChatSystemPrompt(
+  systemPrompt: string | undefined,
+  context: string,
+  conversationHistory: string
+): string {
+  const projectName = manifest?.name || serverConfig.server_name;
+  const retrievedDocuments = context || "No relevant documents found.";
+  const defaultPrompt = `You are a helpful assistant with access to a knowledge base about ${projectName}.
+Answer questions using ONLY the retrieved documents below. Always cite sources using [Source N] notation.
+If the documents don't contain relevant information to answer the question, say so clearly.
+
+RETRIEVED DOCUMENTS:
+${retrievedDocuments}${conversationHistory}`;
+
+  return systemPrompt
+    ? `${systemPrompt}\\n\\nRETRIEVED DOCUMENTS:\\n${retrievedDocuments}${conversationHistory}`
+    : defaultPrompt;
+}
+
+function writeSse(res: express.Response, payload: unknown): void {
+  res.write(`data: ${JSON.stringify(payload)}\\n\\n`);
+}
+
+async function streamChatCompletion(
+  response: Response,
+  res: express.Response
+): Promise<boolean | null> {
+  const reader = response.body?.getReader();
+  if (!reader) {
+    writeSse(res, { type: "error", error: "No response body" });
+    res.end();
+    return null;
+  }
+
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let contentStreamed = false;
+  let chunkCount = 0;
+  let finishReason: string | null = null;
+  let totalLinesParsed = 0;
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\\n");
+    buffer = lines.pop() || "";
+
+    for (const line of lines) {
+      totalLinesParsed++;
+      if (!line.startsWith("data: ")) continue;
+      if (line === "data: [DONE]") {
+        console.error(
+          `[DEBUG] Stream completed. Chunks: ${chunkCount}, Finish reason: ${finishReason}, Lines parsed: ${totalLinesParsed}`
+        );
+        continue;
+      }
+
+      try {
+        const data = JSON.parse(line.slice(6));
+        const content = data.choices?.[0]?.delta?.content;
+        finishReason = data.choices?.[0]?.finish_reason || finishReason;
+
+        if (chunkCount === 0 && content) {
+          console.error(
+            `[DEBUG] First content chunk received: "${content.substring(0, 50)}${content.length > 50 ? "..." : ""}"`
+          );
+        }
+
+        if (content) {
+          writeSse(res, { type: "delta", text: content });
+          contentStreamed = true;
+          chunkCount++;
+        }
+      } catch {
+        // Skip unparseable lines.
+      }
+    }
+  }
+
+  return contentStreamed;
+}
+
+function registerChatRoute(app: express.Express): void {
   app.post("/chat", async (req, res) => {
     const {
       question,
@@ -615,60 +726,30 @@ function startHttpServer(): void {
       return res.status(500).json({ error: `${embeddingModel.api_key_env} not configured` });
     }
 
-    // Generate conversation_id if not provided
     const activeConversationId = conversation_id || randomUUID();
-
-    // Build conversation history context (last 10 turns)
-    const recentMessages = (messages || []).slice(-10);
-    const conversationHistory =
-      recentMessages.length > 0
-        ? `\n\nCONVERSATION HISTORY:\n${recentMessages
-            .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`)
-            .join("\n")}`
-        : "";
-
-    // Search for relevant context using hybrid search
+    const conversationHistory = buildConversationHistory(messages);
     const { results: searchResults } = await searchHybrid(
       searchContext,
       question,
       Math.min(top_k, 10),
       generateQueryEmbedding,
-      (msg) => console.error(msg)
+      message => console.error(message)
+    );
+    const context = buildRetrievedContext(searchResults);
+    const finalSystemPrompt = buildChatSystemPrompt(
+      system_prompt,
+      context,
+      conversationHistory
     );
 
-    // Build context with source citations
-    const contextParts = searchResults.map((r, i) => {
-      const source = sourceMap.get(r.chunk.source_id);
-      const sourceName = source?.source_name || source?.uri || "Unknown";
-      return `[Source ${i + 1}: ${sourceName}]\n${r.chunk.text}`;
-    });
-    const context = contextParts.join("\n\n---\n\n");
-
-    const projectName = manifest?.name || serverConfig.server_name;
-    const defaultSystemPrompt = `You are a helpful assistant with access to a knowledge base about ${projectName}.
-Answer questions using ONLY the retrieved documents below. Always cite sources using [Source N] notation.
-If the documents don't contain relevant information to answer the question, say so clearly.
-
-RETRIEVED DOCUMENTS:
-${context || "No relevant documents found."}${conversationHistory}`;
-
-    const finalSystemPrompt = system_prompt
-      ? `${system_prompt}\n\nRETRIEVED DOCUMENTS:\n${context || "No relevant documents found."}${conversationHistory}`
-      : defaultSystemPrompt;
-
-    // Set up SSE headers
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
     res.flushHeaders();
-
-    // Send sources first
-    res.write(
-      `data: ${JSON.stringify({
-        type: "sources",
-        sources: searchResults.map((r) => enrichWithSource(r.chunk, r.score)),
-      })}\n\n`
-    );
+    writeSse(res, {
+      type: "sources",
+      sources: searchResults.map(result => enrichWithSource(result.chunk, result.score)),
+    });
 
     try {
       const response = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -692,79 +773,17 @@ ${context || "No relevant documents found."}${conversationHistory}`;
         const error = await response
           .json()
           .catch(() => ({ error: { message: "API request failed" } }));
-        res.write(
-          `data: ${JSON.stringify({
-            type: "error",
-            error: error.error?.message || "API request failed",
-          })}\n\n`
-        );
+        writeSse(res, {
+          type: "error",
+          error: error.error?.message || "API request failed",
+        });
         res.end();
         return;
       }
 
-      const reader = response.body?.getReader();
-      if (!reader) {
-        res.write(`data: ${JSON.stringify({ type: "error", error: "No response body" })}\n\n`);
-        res.end();
-        return;
-      }
+      const contentStreamed = await streamChatCompletion(response, res);
+      if (contentStreamed === null) return;
 
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let contentStreamed = false;
-
-      // Debug counters for diagnosing empty responses
-      let chunkCount = 0;
-      let finishReason: string | null = null;
-      let totalLinesParsed = 0;
-
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-          totalLinesParsed++;
-
-          if (line.startsWith("data: ")) {
-            if (line === "data: [DONE]") {
-              console.error(
-                `[DEBUG] Stream completed. Chunks: ${chunkCount}, ` +
-                  `Finish reason: ${finishReason}, Lines parsed: ${totalLinesParsed}`
-              );
-              continue;
-            }
-
-            try {
-              const data = JSON.parse(line.slice(6));
-              const content = data.choices?.[0]?.delta?.content;
-              finishReason = data.choices?.[0]?.finish_reason || finishReason;
-
-              // Log first chunk for debugging
-              if (chunkCount === 0 && content) {
-                console.error(
-                  `[DEBUG] First content chunk received: "${content.substring(0, 50)}${
-                    content.length > 50 ? "..." : ""
-                  }"`
-                );
-              }
-
-              if (content) {
-                res.write(`data: ${JSON.stringify({ type: "delta", text: content })}\n\n`);
-                contentStreamed = true;
-                chunkCount++;
-              }
-            } catch {
-              // Skip unparseable lines
-            }
-          }
-        }
-      }
-
-      // Log warning if LLM returned no content
       if (!contentStreamed) {
         console.error("[WARN] LLM returned no content. This may indicate:");
         console.error(`  - Invalid or missing ${embeddingModel.api_key_env}`);
@@ -772,23 +791,21 @@ ${context || "No relevant documents found."}${conversationHistory}`;
         console.error("  - Empty response from the model");
       }
 
-      res.write(
-        `data: ${JSON.stringify({
-          type: "done",
-          conversation_id: activeConversationId,
-          empty_response: !contentStreamed,
-        })}\n\n`
-      );
+      writeSse(res, {
+        type: "done",
+        conversation_id: activeConversationId,
+        empty_response: !contentStreamed,
+      });
       res.end();
     } catch (error) {
       console.error("Chat error:", error);
-      res.write(
-        `data: ${JSON.stringify({ type: "error", error: "Failed to generate response" })}\n\n`
-      );
+      writeSse(res, { type: "error", error: "Failed to generate response" });
       res.end();
     }
   });
+}
 
+function registerErrorHandler(app: express.Express): void {
   // Error handler
   app.use(
     (err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
@@ -796,6 +813,20 @@ ${context || "No relevant documents found."}${conversationHistory}`;
       res.status(500).json({ error: "Internal server error" });
     }
   );
+}
+
+function startHttpServer(): void {
+
+  const app = express();
+  app.use(express.json({ limit: "1mb" }));
+  registerRequestMiddleware(app);
+  registerHealthRoute(app);
+  registerStatsRoute(app);
+  registerSourcesRoute(app);
+  registerSearchRoute(app);
+  registerChunkRoute(app);
+  registerChatRoute(app);
+  registerErrorHandler(app);
 
   const PORT = parseInt(process.env.PORT || String(serverConfig.port));
   app.listen(PORT, () => {
