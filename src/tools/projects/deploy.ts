@@ -495,6 +495,7 @@ RUN npm ci --only=production && npm cache clean --force
 # Copy built files and data
 COPY --from=builder /app/dist/ ./dist/
 COPY data/ ./data/
+COPY frontend/index.html ./frontend/index.html
 COPY sources.jsonl ./
 COPY project.json ./
 COPY server.config.json ./

@@ -41,6 +41,7 @@ import { shouldStartHttp } from "./runtime.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = join(__dirname, "..", "data");
 const PROJECT_DIR = join(__dirname, "..");
+const FRONTEND_DIR = join(PROJECT_DIR, "frontend");
 
 // ============================================================================
 // Type Definitions
@@ -510,6 +511,15 @@ function registerRequestMiddleware(app: express.Express): void {
   });
 }
 
+function registerFrontendRoute(app: express.Express): void {
+  if (!existsSync(FRONTEND_DIR)) return;
+
+  // Serve the generated workbench from the same origin as the RAG API.
+  // This keeps exported projects deployable as one Railway service while
+  // preserving the API-only behavior for projects without a frontend.
+  app.use(express.static(FRONTEND_DIR, { index: "index.html" }));
+}
+
 function registerHealthRoute(app: express.Express): void {
   // Health check endpoint
   app.get("/health", (_, res) => {
@@ -820,6 +830,7 @@ function startHttpServer(): void {
   const app = express();
   app.use(express.json({ limit: "1mb" }));
   registerRequestMiddleware(app);
+  registerFrontendRoute(app);
   registerHealthRoute(app);
   registerStatsRoute(app);
   registerSourcesRoute(app);
