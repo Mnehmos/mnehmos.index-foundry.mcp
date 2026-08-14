@@ -36,6 +36,7 @@ import {
   type SearchContext,
   type Vector,
 } from "./search.js";
+import { shouldStartHttp } from "./runtime.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = join(__dirname, "..", "data");
@@ -809,7 +810,9 @@ ${context || "No relevant documents found."}${conversationHistory}`;
 
 loadData();
 
-if (serverConfig.include_http) {
+// MCP clients launch this process over stdio by default. Only bind the HTTP
+// API when the deployment explicitly opts in with INDEXFOUNDRY_HTTP=1.
+if (shouldStartHttp(serverConfig)) {
   startHttpServer();
 }
 

@@ -220,7 +220,7 @@ export async function projectServe(input: ProjectServeInput): Promise<ProjectSer
       console.error(`[start] Starting dev server for ${input.project_id} on port ${port}...`);
       serverProcess = spawnDetached("npx", ["tsx", "src/index.ts"], {
         cwd: paths.root,
-        env: { ...process.env, PORT: String(port) },
+        env: { ...process.env, PORT: String(port), INDEXFOUNDRY_HTTP: "1" },
         detached: true,
         stdio: ["ignore", "pipe", "pipe"],
       });
@@ -239,7 +239,7 @@ export async function projectServe(input: ProjectServeInput): Promise<ProjectSer
       console.error(`[start] Starting production server for ${input.project_id} on port ${port}...`);
       serverProcess = spawnDetached("node", ["dist/index.js"], {
         cwd: paths.root,
-        env: { ...process.env, PORT: String(port) },
+        env: { ...process.env, PORT: String(port), INDEXFOUNDRY_HTTP: "1" },
         detached: true,
         stdio: ["ignore", "pipe", "pipe"],
       });

@@ -695,4 +695,13 @@ describe('Exported server template', () => {
       include_http: false,
     });
   });
+
+  it('keeps HTTP opt-in so stdio launches do not claim a port', async () => {
+    const { shouldStartHttp } = await import('../src/templates/server/runtime.js');
+
+    expect(shouldStartHttp({ include_http: true }, {})).toBe(false);
+    expect(shouldStartHttp({ include_http: true }, { INDEXFOUNDRY_HTTP: '1' })).toBe(true);
+    expect(shouldStartHttp({ include_http: true }, { INDEXFOUNDRY_HTTP: 'true' })).toBe(true);
+    expect(shouldStartHttp({ include_http: false }, { INDEXFOUNDRY_HTTP: '1' })).toBe(false);
+  });
 });

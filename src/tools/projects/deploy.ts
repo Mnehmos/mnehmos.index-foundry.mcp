@@ -492,6 +492,7 @@ COPY server.config.json ./
 
 ENV NODE_ENV=production
 ENV PORT=${port}
+ENV INDEXFOUNDRY_HTTP=1
 
 EXPOSE ${port}
 
@@ -531,6 +532,12 @@ npm run build
 npm start
 \`\`\`
 
+## Run modes
+
+By default, npm start runs as a stdio-only MCP server and does not claim a TCP port.
+Enable the HTTP API explicitly by setting INDEXFOUNDRY_HTTP=1 before running npm start.
+On PowerShell, use $env:INDEXFOUNDRY_HTTP="1"; npm start.
+
 ## Index Stats
 
 | Metric | Count |
@@ -545,6 +552,7 @@ npm start
 | Variable | Required | Description |
 |----------|----------|-------------|
 | \`PORT\` | No | HTTP server port (default: ${port}) |
+| \`INDEXFOUNDRY_HTTP\` | No | Set to \`1\` to enable the HTTP API; omitted for stdio-only MCP mode |
 | \`OPENAI_API_KEY\` | For /chat | OpenAI API key for chat endpoint |
 | \`OPENAI_MODEL\` | No | Model for chat (default: gpt-5-nano-2025-08-07) |
 
@@ -620,10 +628,12 @@ Add your OpenAI API key to the \`.env\` file:
 OPENAI_API_KEY=sk-proj-your-key-here
 \`\`\`
 
-### Step 3: Start the Server
+### Step 3: Start the HTTP Server
 \`\`\`bash
-npm run dev
+INDEXFOUNDRY_HTTP=1 npm run dev
 \`\`\`
+On PowerShell, use $env:INDEXFOUNDRY_HTTP="1"; npm run dev.
+
 You should see:
 \`\`\`
 Loaded X sources
@@ -819,6 +829,7 @@ ${apiKeyEnv}=sk-your-key-here
 
 # Optional configuration
 PORT=${port}
+# Set INDEXFOUNDRY_HTTP=1 to enable the HTTP API (stdio-only MCP is the default)
 OPENAI_MODEL=gpt-5-nano-2025-08-07
 NODE_ENV=production
 `);
@@ -915,7 +926,7 @@ window.LOCAL_CONFIG = {
  * built here. They read configuration from project.json and server.config.json
  * at runtime, so no substitution happens at export time.
  */
-const SERVER_TEMPLATE_FILES = ["index.ts", "search.ts"] as const;
+const SERVER_TEMPLATE_FILES = ["index.ts", "search.ts", "runtime.ts"] as const;
 
 function readServerTemplate(fileName: string): string {
   return readFileSync(path.join(TEMPLATES_DIR, "server", fileName), "utf-8");

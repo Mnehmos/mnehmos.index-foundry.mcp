@@ -52,3 +52,6 @@ screenshots/
 # Generated per-project runtime state and machine-local config
 .server.pid
 /projects/*/frontend/local.config.js
+
+# Repowise local index/cache
+/.repowise/
