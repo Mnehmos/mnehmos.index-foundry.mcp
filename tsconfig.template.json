@@ -1,0 +1,15 @@
+{
+  "//": "Type-checks the exported server template against the dependency set that exported projects install. Not part of the main build - src/templates is copied verbatim, not compiled.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022", "DOM"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["src/templates/server/**/*.ts"]
+}

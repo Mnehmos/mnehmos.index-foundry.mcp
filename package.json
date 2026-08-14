@@ -18,12 +18,14 @@
   ],
   "scripts": {
     "build": "tsc && npm run copy-templates",
-    "copy-templates": "xcopy /Y /I src\\templates dist\\templates",
+    "copy-templates": "node scripts/copy-templates.mjs",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "lint": "eslint src --ext .ts",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "typecheck:template": "tsc --noEmit -p tsconfig.template.json",
     "clean": "rimraf dist",
     "prepublishOnly": "npm run clean && npm run build && npm run test"
   },
@@ -50,13 +52,20 @@
     "zod": "^3.24.1"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "@types/express": "^5.0.6",
     "@types/node": "^22.10.2",
     "@types/pdf-parse": "^1.1.4",
     "@types/uuid": "^10.0.0",
+    "dotenv": "^17.4.2",
+    "eslint": "^9.39.5",
+    "express": "^5.2.1",
+    "globals": "^17.11.0",
     "pdf-lib": "^1.17.1",
     "rimraf": "^6.0.1",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
+    "typescript-eslint": "^8.67.0",
     "vitest": "^2.1.8"
   },
   "engines": {

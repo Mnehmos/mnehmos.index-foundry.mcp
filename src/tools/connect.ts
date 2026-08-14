@@ -298,10 +298,18 @@ export async function connectSitemap(input: ConnectSitemapInput): Promise<Connec
       // Fill up to concurrency limit
       while (queue.length > 0 && inFlight.length < input.concurrency) {
         const url = queue.shift()!;
-        const promise = fetchOne(url).then(() => {
-          const idx = inFlight.indexOf(promise);
-          if (idx >= 0) inFlight.splice(idx, 1);
-        });
+        // An unexpected throw must still record the failure and drain the slot;
+        // otherwise the promise stays in inFlight and aborts the whole crawl.
+        const promise = fetchOne(url)
+          .catch((err) => {
+            result.urls_failed++;
+            result.errors.push({ url, error: String(err) });
+          })
+          .then(() => {
+            const idx = inFlight.indexOf(promise);
+            // `void`: splice returns the removed promises, which we discard.
+            if (idx >= 0) void inFlight.splice(idx, 1);
+          });
         inFlight.push(promise);
       }
       

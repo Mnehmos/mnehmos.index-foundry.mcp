@@ -1,12 +1,19 @@
-name: Publish to NPM
+name: CI
 
 on:
-  release:
-    types: [published]
+  push:
+    branches: [master]
+  pull_request:
 
 jobs:
-  publish:
-    runs-on: ubuntu-latest
+  check:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The build step used to be Windows-only (xcopy); ubuntu keeps it honest.
+        os: [ubuntu-latest, windows-latest]
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -15,7 +22,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
+          cache: 'npm'
 
       - name: Install dependencies
         run: npm ci
@@ -32,10 +39,5 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Run tests
+      - name: Test
         run: npm test
-
-      - name: Publish to NPM
-        run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

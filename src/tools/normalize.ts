@@ -542,7 +542,7 @@ export async function normalizeChunk(input: NormalizeChunkInput): Promise<Normal
             }
             break;
             
-          case "by_sentence":
+          case "by_sentence": {
             const sentences = normalizedContent.split(/(?<=[.!?])\s+/);
             chunks = [];
             let current = "";
@@ -556,6 +556,7 @@ export async function normalizeChunk(input: NormalizeChunkInput): Promise<Normal
             }
             if (current) chunks.push(current);
             break;
+          }
             
           case "by_page":
             // For page-based, assume page markers or use fixed splits

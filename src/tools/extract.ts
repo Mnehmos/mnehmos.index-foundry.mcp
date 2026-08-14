@@ -470,7 +470,7 @@ export async function extractDocument(input: ExtractDocumentInput): Promise<Extr
         text = normalizeText(content.toString("utf-8"));
         break;
         
-      case "csv":
+      case "csv": {
         // Parse CSV and convert to readable text
         const csvContent = content.toString("utf-8");
         const lines = csvContent.split("\n");
@@ -499,7 +499,8 @@ export async function extractDocument(input: ExtractDocumentInput): Promise<Extr
           }
         }
         break;
-        
+      }
+
       case "json":
         // Pretty-print JSON for readability
         try {

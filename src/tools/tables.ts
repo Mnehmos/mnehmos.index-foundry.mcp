@@ -411,7 +411,7 @@ function linearizeTable(
         `Column '${h}': ${rows.map(r => r[j] || '').join(', ')}`
       ).join('; ');
 
-    case 'natural_language':
+    case 'natural_language': {
       const rowCount = rows.length;
       const colCount = headers.length;
       let description = `This table has ${rowCount} rows and ${colCount} columns. `;
@@ -424,6 +424,7 @@ function linearizeTable(
         description += `Sample data: ${sampleParts.join('. ')}.`;
       }
       return description;
+    }
   }
 }
 

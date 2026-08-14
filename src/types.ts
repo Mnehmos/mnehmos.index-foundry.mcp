@@ -360,6 +360,7 @@ export type ErrorCode =
   | "EXPORT_FAILED"
   | "NOT_EXPORTED"
   | "ENV_VAR_FAILED"
+  | "INVALID_ENV_VAR"
   | "DEPLOY_FAILED"
   // ADR-005: Batch source management errors
   | "MUTUAL_EXCLUSIVITY"
