@@ -564,7 +564,7 @@ On PowerShell, use $env:INDEXFOUNDRY_HTTP="1"; npm start.
 | \`PORT\` | No | HTTP server port (default: ${port}) |
 | \`INDEXFOUNDRY_HTTP\` | No | Set to \`1\` to enable the HTTP API; omitted for stdio-only MCP mode |
 | \`OPENAI_API_KEY\` | For /chat | OpenAI API key used for embeddings and chat |
-| \`RAG_API_TOKEN\` | Production | Bearer token required by \`/chat\` when \`NODE_ENV=production\` |
+| \`RAG_API_TOKEN\` | API/cross-origin /chat | Bearer token for API clients and separately hosted frontends; the bundled same-origin frontend uses the browser-origin policy |
 | \`CORS_ORIGINS\` | No | Comma-separated exact origins allowed for cross-origin requests |
 | \`CHAT_RATE_LIMIT_PER_MINUTE\` | No | Per-client \`/chat\` limit; defaults to 30 |
 | \`OPENAI_MODEL\` | No | Model for chat (default: gpt-5-nano-2025-08-07) |
@@ -658,7 +658,7 @@ HTTP server listening on port ${port}
 
 ### Step 4: Test the Frontend
 1. Copy \`frontend/local.config.js.example\` to \`frontend/local.config.js\`
-2. Open \`frontend/index.html\` in your browser
+2. Open \`http://localhost:${port}/\` in your browser (or run the project with \`open_browser\` enabled)
 3. The status should show "Ready" (green indicator)
 4. Ask a question to verify the chat works!
 
@@ -921,10 +921,12 @@ runs/
 
     // local.config.js.example for development
     await writeFile(path.join(frontendDir, 'local.config.js.example'), `// Local development configuration
-// Copy this file to local.config.js and edit the RAG_SERVER URL
+// Copy this file to local.config.js and edit the server URL and token as needed
 
 window.LOCAL_CONFIG = {
-  RAG_SERVER: 'http://localhost:${port}'
+  RAG_SERVER: 'http://localhost:${port}',
+  // Required when the frontend calls a different origin in production.
+  RAG_API_TOKEN: ''
 };
 `);
     files.push('frontend/local.config.js.example');

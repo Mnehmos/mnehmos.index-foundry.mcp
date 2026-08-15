@@ -339,7 +339,9 @@ async function openProjectFrontend(
   if (!(await pathExists(frontendPath))) return;
 
   try {
-    await openInBrowser(frontendPath);
+    // Serve the frontend through Express so browser requests have a supported
+    // origin instead of the `file://` / `Origin: null` origin.
+    await openInBrowser(`http://localhost:${input.port}/`);
     console.error("[browser] Opened frontend in browser");
   } catch {
     console.error("Could not open browser automatically");
@@ -450,9 +452,17 @@ export async function projectServeStop(input: ProjectServeStopInput): Promise<Pr
     });
   }
 
-  // A PID can be reused after a crash or reboot. Require the recorded port to
-  // answer the server health endpoint before sending a signal.
-  if (!isProcessRunning(pid) || !endpoint || !(await isHealthyEndpoint(endpoint))) {
+  // A persisted PID can be reused after a crash or reboot, so require its
+  // recorded port to answer the health endpoint before sending a signal. An
+  // in-memory child was spawned by this MCP instance, so it can be stopped
+  // even when its health endpoint is currently unhealthy.
+  const processRunning = isProcessRunning(pid);
+  const identityConfirmed = runningServer
+    ? processRunning
+    : processRunning && endpoint !== undefined
+      ? await isHealthyEndpoint(endpoint)
+      : false;
+  if (!identityConfirmed) {
     // Clean up stale references
     runningServers.delete(input.project_id);
     await deleteServerPidFile(input.project_id);

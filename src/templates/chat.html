@@ -937,7 +937,8 @@
         
         // Configuration
         this.config = {
-          ragServer: window.LOCAL_CONFIG?.RAG_SERVER || '{{RAG_SERVER_URL}}'
+          ragServer: window.LOCAL_CONFIG?.RAG_SERVER || '{{RAG_SERVER_URL}}',
+          ragApiToken: window.LOCAL_CONFIG?.RAG_API_TOKEN || ''
         };
         
         this.init();
@@ -1350,9 +1351,14 @@
           }
           
           // Call RAG server's /chat endpoint
+          const headers = { 'Content-Type': 'application/json' };
+          if (this.config.ragApiToken) {
+            headers.Authorization = `Bearer ${this.config.ragApiToken}`;
+          }
+
           const response = await fetch(`${this.config.ragServer}/chat`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers,
             body: JSON.stringify(payload)
           });
           

@@ -57,7 +57,23 @@ function resolveInvocation(command: string, args: string[]): { file: string; arg
     npx: path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npx-cli.js"),
     railway: path.join(path.dirname(process.execPath), "node_modules", "@railway", "cli", "bin", "railway.js"),
   };
-  const nodeCli = nodeCliByCommand[command];
+  const nodeCliCandidates = [nodeCliByCommand[command]];
+  if (command === "railway") {
+    const globalPrefixes = [
+      process.env.npm_config_prefix,
+      process.env.NPM_CONFIG_PREFIX,
+      process.env.APPDATA ? path.join(process.env.APPDATA, "npm") : undefined,
+      ...(process.env.Path ?? process.env.PATH ?? "").split(path.delimiter),
+    ].filter((prefix): prefix is string => Boolean(prefix));
+
+    nodeCliCandidates.push(
+      ...globalPrefixes.map(prefix =>
+        path.join(prefix, "node_modules", "@railway", "cli", "bin", "railway.js")
+      )
+    );
+  }
+
+  const nodeCli = nodeCliCandidates.find(candidate => Boolean(candidate) && existsSync(candidate));
 
   if (nodeCli && existsSync(nodeCli)) {
     return { file: process.execPath, args: [nodeCli, ...args] };
