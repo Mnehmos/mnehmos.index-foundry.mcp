@@ -282,7 +282,7 @@ export async function indexUpsert(input: IndexUpsertInput): Promise<IndexUpsertR
     const { duration_ms } = await timed(async () => {
       // Process based on provider
       switch (input.provider) {
-        case "local":
+        case "local": {
           // Local file-based vector storage
           const localDb: Array<{
             id: string;
@@ -326,7 +326,8 @@ export async function indexUpsert(input: IndexUpsertInput): Promise<IndexUpsertR
             }
           );
           break;
-          
+        }
+
         case "chroma":
         case "pinecone":
         case "weaviate":

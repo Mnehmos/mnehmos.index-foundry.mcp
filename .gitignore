@@ -23,13 +23,13 @@ Thumbs.db
 *.swo
 
 # Run artifacts (generated during pipeline execution)
-runs/
+/runs/
 
 # Project data (generated embeddings and chunks)
-projects/*/data/
-projects/*/runs/
-projects/*/node_modules/
-projects/*/dist/
+/projects/*/data/
+/projects/*/runs/
+/projects/*/node_modules/
+/projects/*/dist/
 
 # Temporary files
 *.tmp
@@ -42,3 +42,16 @@ projects/*/dist/
 
 # Screenshots (test artifacts)
 screenshots/
+
+# Local project data (multi-GB) + per-user settings.
+# Anchored with a leading slash: an unanchored `projects/` also matched
+# src/tools/projects/, silently excluding source files from the repo.
+/projects/
+.claude/settings.local.json
+
+# Generated per-project runtime state and machine-local config
+.server.pid
+/projects/*/frontend/local.config.js
+
+# Repowise local index/cache
+/.repowise/

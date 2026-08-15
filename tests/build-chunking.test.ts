@@ -20,7 +20,7 @@
  * - src/index.ts - Tool registration
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import path from 'path';
 import { mkdtemp, rm, mkdir } from 'fs/promises';
 import { tmpdir } from 'os';
@@ -44,7 +44,92 @@ import {
   writeJsonl,
   writeJson,
   readJson,
+  readJsonl,
 } from '../src/utils.js';
+
+// ============================================================================
+// Network Stubbing
+// ============================================================================
+//
+// These tests used to issue real requests to example.com, get 404s, and still
+// pass because they only asserted on the shape of the error response. Nothing
+// here touches the network: source fetches and embedding calls are both served
+// from fixtures, so a build actually produces chunks and vectors and the
+// assertions can be about outcomes.
+
+const EMBEDDING_DIMENSIONS = 8;
+const TEST_API_KEY_ENV = 'OPENAI_API_KEY';
+
+/** Roughly 2,400 characters, enough to chunk into several pieces. */
+const FIXTURE_PARAGRAPH =
+  'IndexFoundry builds deterministic vector indexes from arbitrary content sources. ' +
+  'Each artifact is content hashed so that re-running a pipeline produces identical output. ' +
+  'The normalize phase splits text into overlapping chunks using a recursive strategy. ';
+
+const FIXTURE_HTML = `<!doctype html>
+<html>
+  <head><title>Fixture Document</title></head>
+  <body>
+    <article>
+      <h1>Fixture Document</h1>
+      ${Array.from({ length: 10 }, (_, i) => `<p>Section ${i + 1}. ${FIXTURE_PARAGRAPH}</p>`).join('\n      ')}
+    </article>
+  </body>
+</html>`;
+
+/** Deterministic unit-ish vector; contents do not matter, only shape and count. */
+function fixtureEmbedding(seed: number): number[] {
+  return Array.from({ length: EMBEDDING_DIMENSIONS }, (_, i) =>
+    Math.sin((seed + 1) * (i + 1))
+  );
+}
+
+interface FetchStubOptions {
+  /** URLs matching this predicate resolve with a non-OK response. */
+  failUrl?: (url: string) => boolean;
+  /** Force embedding requests to fail, to exercise the error path. */
+  failEmbeddings?: boolean;
+}
+
+function installFetchStub(options: FetchStubOptions = {}) {
+  const calls = { sources: [] as string[], embeddings: 0 };
+
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+
+      if (url.includes('api.openai.com')) {
+        calls.embeddings++;
+        if (options.failEmbeddings) {
+          return new Response('rate limited', { status: 500, statusText: 'Server Error' });
+        }
+        const body = JSON.parse(String(init?.body ?? '{}')) as { input?: string[] };
+        const inputs = body.input ?? [];
+        return new Response(
+          JSON.stringify({
+            data: inputs.map((_, index) => ({ embedding: fixtureEmbedding(index), index })),
+            usage: { total_tokens: inputs.length * 100 },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+
+      calls.sources.push(url);
+
+      if (options.failUrl?.(url)) {
+        return new Response('not found', { status: 404, statusText: 'Not Found' });
+      }
+
+      return new Response(FIXTURE_HTML, {
+        status: 200,
+        headers: { 'content-type': 'text/html; charset=utf-8' },
+      });
+    })
+  );
+
+  return calls;
+}
 
 // ============================================================================
 // Test Helpers
@@ -150,6 +235,9 @@ function createMockSource(overrides: Partial<SourceRecord> = {}): SourceRecord {
 // Type helpers for test assertions
 type BuildResult = {
   success: boolean;
+  sources_processed?: number;
+  chunks_added?: number;
+  vectors_added?: number;
   progress?: {
     total_sources?: number;
     processed_this_run?: number;
@@ -381,14 +469,19 @@ describe('ProjectBuildSchema with chunk_options (ADR-006)', () => {
 
 describe('ProjectBuildResult Extensions (ADR-006)', () => {
   let tempDir: string;
-  
+  let fetchCalls: ReturnType<typeof installFetchStub>;
+
   beforeEach(async () => {
     tempDir = await createTempProjectDir();
     initProjectManager(tempDir);
+    fetchCalls = installFetchStub();
+    process.env[TEST_API_KEY_ENV] = 'test-key';
   });
   
   afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
+    vi.unstubAllGlobals();
+    delete process.env[TEST_API_KEY_ENV];
   });
 
   it('BLD-200: should include progress object in build result', async () => {
@@ -714,14 +807,19 @@ describe('BuildCheckpointSchema Validation (ADR-006)', () => {
 
 describe('Checkpoint Functionality (ADR-006)', () => {
   let tempDir: string;
-  
+  let fetchCalls: ReturnType<typeof installFetchStub>;
+
   beforeEach(async () => {
     tempDir = await createTempProjectDir();
     initProjectManager(tempDir);
+    fetchCalls = installFetchStub();
+    process.env[TEST_API_KEY_ENV] = 'test-key';
   });
   
   afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
+    vi.unstubAllGlobals();
+    delete process.env[TEST_API_KEY_ENV];
   });
 
   it('BLD-400: should create checkpoint when enable_checkpointing=true', async () => {
@@ -906,14 +1004,19 @@ describe('Checkpoint Functionality (ADR-006)', () => {
 
 describe('Concurrent Fetch Functionality (ADR-006)', () => {
   let tempDir: string;
-  
+  let fetchCalls: ReturnType<typeof installFetchStub>;
+
   beforeEach(async () => {
     tempDir = await createTempProjectDir();
     initProjectManager(tempDir);
+    fetchCalls = installFetchStub();
+    process.env[TEST_API_KEY_ENV] = 'test-key';
   });
   
   afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
+    vi.unstubAllGlobals();
+    delete process.env[TEST_API_KEY_ENV];
   });
 
   it('BLD-500: should accept fetch_concurrency=1 for sequential processing', () => {
@@ -971,7 +1074,10 @@ describe('Concurrent Fetch Functionality (ADR-006)', () => {
   });
 
   it('BLD-503: should handle partial failures gracefully during fetch', async () => {
-    // ADR-006: Concurrent fetch handles partial failures gracefully
+    // ADR-006: one bad source must not sink the good ones in the same build.
+    vi.unstubAllGlobals();
+    installFetchStub({ failUrl: (url) => url.includes('/broken') });
+
     const projectId = 'partial-failure-test';
     const sources = [
       createMockSource({
@@ -980,19 +1086,35 @@ describe('Concurrent Fetch Functionality (ADR-006)', () => {
         uri: 'https://example.com/valid',
         status: 'pending',
       }),
+      createMockSource({
+        source_id: 'broken-url',
+        type: 'url',
+        uri: 'https://example.com/broken',
+        status: 'pending',
+      }),
     ];
     await initTestProject(tempDir, projectId, { sources });
-    
+
     const result = await projectBuild({
       project_id: projectId,
       force: false,
       dry_run: false,
     }) as BuildResult;
-    
-    // Build should succeed overall
+
     expect(result.success).toBe(true);
-    // FAILS: errors array should be included in result
-    expect(result.errors).toBeDefined();
+    // The good source produced content; the bad one was reported, not swallowed.
+    expect(result.sources_processed).toBe(1);
+    expect(result.chunks_added).toBeGreaterThan(0);
+    expect(result.errors).toHaveLength(1);
+    expect((result.errors as Array<{ source_id: string }>)[0].source_id).toBe('broken-url');
+
+    // Per-source status reflects what actually happened.
+    const project = await projectGet({ project_id: projectId });
+    if ('sources' in project) {
+      const byId = new Map((project.sources as SourceRecord[]).map((s) => [s.source_id, s.status]));
+      expect(byId.get('valid-url')).toBe('completed');
+      expect(byId.get('broken-url')).toBe('failed');
+    }
   });
 });
 
@@ -1002,14 +1124,19 @@ describe('Concurrent Fetch Functionality (ADR-006)', () => {
 
 describe('ProjectBuildStatusSchema and Tool (ADR-006)', () => {
   let tempDir: string;
-  
+  let fetchCalls: ReturnType<typeof installFetchStub>;
+
   beforeEach(async () => {
     tempDir = await createTempProjectDir();
     initProjectManager(tempDir);
+    fetchCalls = installFetchStub();
+    process.env[TEST_API_KEY_ENV] = 'test-key';
   });
   
   afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
+    vi.unstubAllGlobals();
+    delete process.env[TEST_API_KEY_ENV];
   });
 
   it('BLD-600: should export ProjectBuildStatusSchema from schemas-projects', async () => {
@@ -1127,14 +1254,19 @@ describe('ProjectBuildStatusSchema and Tool (ADR-006)', () => {
 
 describe('Build Chunking Edge Cases (ADR-006)', () => {
   let tempDir: string;
-  
+  let fetchCalls: ReturnType<typeof installFetchStub>;
+
   beforeEach(async () => {
     tempDir = await createTempProjectDir();
     initProjectManager(tempDir);
+    fetchCalls = installFetchStub();
+    process.env[TEST_API_KEY_ENV] = 'test-key';
   });
   
   afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
+    vi.unstubAllGlobals();
+    delete process.env[TEST_API_KEY_ENV];
   });
 
   it('BLD-700: should handle empty project gracefully', async () => {
@@ -1186,10 +1318,14 @@ describe('Build Chunking Edge Cases (ADR-006)', () => {
       force: true,
       dry_run: false,
     }) as BuildResult;
-    
+
     expect(result.success).toBe(true);
-    // FAILS: progress.processed_this_run not yet implemented with force
     expect(result.progress?.processed_this_run).toBe(2);
+    // force=true must genuinely re-run the sources, not just count them.
+    expect(result.errors).toHaveLength(0);
+    expect(result.sources_processed).toBe(2);
+    expect(result.chunks_added).toBeGreaterThan(0);
+    expect(fetchCalls.sources).toHaveLength(2);
   });
 
   it('BLD-703: should return dry_run preview without processing', async () => {
@@ -1229,10 +1365,71 @@ describe('Build Chunking Edge Cases (ADR-006)', () => {
       dry_run: false,
       // No chunk_options - should use defaults
     }) as BuildResult;
-    
+
     expect(result.success).toBe(true);
-    // FAILS: progress and metrics not yet included
+    // The source must actually have been processed - a silent fetch failure
+    // used to satisfy this test.
+    expect(result.errors).toHaveLength(0);
+    expect(result.sources_processed).toBe(1);
+    expect(result.chunks_added).toBeGreaterThan(0);
     expect(result.progress).toBeDefined();
     expect(result.metrics).toBeDefined();
+
+    // Defaults were applied and the fixture text split into more than one chunk.
+    const chunks = await readJsonl<ChunkRecord>(
+      path.join(tempDir, 'projects', projectId, 'data', 'chunks.jsonl')
+    );
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(chunk.text.length).toBeGreaterThan(0);
+      expect(chunk.position.end_char).toBeGreaterThan(chunk.position.start_char);
+    }
+  });
+
+  it('BLD-705: should embed every chunk it creates', async () => {
+    const projectId = 'embed-coverage-test';
+    await initTestProject(tempDir, projectId, {
+      sources: [createMockSource({ status: 'pending' })],
+    });
+
+    const result = await projectBuild({
+      project_id: projectId,
+      force: false,
+      dry_run: false,
+    }) as BuildResult;
+
+    expect(result.chunks_added).toBeGreaterThan(0);
+    expect(result.vectors_added).toBe(result.chunks_added);
+
+    const dataDir = path.join(tempDir, 'projects', projectId, 'data');
+    const chunks = await readJsonl<ChunkRecord>(path.join(dataDir, 'chunks.jsonl'));
+    const vectors = await readJsonl<VectorRecord>(path.join(dataDir, 'vectors.jsonl'));
+
+    expect(vectors).toHaveLength(chunks.length);
+    const chunkIds = new Set(chunks.map((c) => c.chunk_id));
+    for (const vector of vectors) {
+      expect(chunkIds.has(vector.chunk_id)).toBe(true);
+      expect(vector.embedding).toHaveLength(EMBEDDING_DIMENSIONS);
+    }
+  });
+
+  it('BLD-706: should surface embedding failures instead of reporting success', async () => {
+    vi.unstubAllGlobals();
+    installFetchStub({ failEmbeddings: true });
+
+    const projectId = 'embed-failure-test';
+    await initTestProject(tempDir, projectId, {
+      sources: [createMockSource({ status: 'pending' })],
+    });
+
+    const result = await projectBuild({
+      project_id: projectId,
+      force: false,
+      dry_run: false,
+    }) as BuildResult;
+
+    // No vectors were produced, so the build must not claim a clean run.
+    expect(result.vectors_added ?? 0).toBe(0);
+    expect((result.errors as unknown[]).length).toBeGreaterThan(0);
   });
 });

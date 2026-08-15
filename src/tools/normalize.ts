@@ -11,10 +11,10 @@
 import * as path from "path";
 import * as fs from "fs/promises";
 import type { DocumentChunk, ToolError } from "../types.js";
-import type { 
-  NormalizeChunkInput, 
-  NormalizeEnrichInput, 
-  NormalizeDedupeInput 
+import type {
+  NormalizeChunkInput,
+  NormalizeEnrichInput,
+  NormalizeDedupeInput
 } from "../schemas.js";
 import {
   sha256,
@@ -71,19 +71,19 @@ function recursiveChunk(
   if (text.length <= maxChars) {
     return [text];
   }
-  
+
   // Try each separator in order
   for (const sep of separators) {
     const parts = text.split(sep);
-    
+
     // If we got multiple parts, process them
     if (parts.length > 1) {
       const chunks: string[] = [];
       let current = "";
-      
+
       for (const part of parts) {
         const candidate = current ? current + sep + part : part;
-        
+
         if (candidate.length <= maxChars) {
           current = candidate;
         } else {
@@ -94,7 +94,7 @@ function recursiveChunk(
             // Append small chunk to previous
             chunks[chunks.length - 1] += sep + current;
           }
-          
+
           // Start new chunk
           if (part.length > maxChars) {
             // Part is too large, recurse with next separator
@@ -112,14 +112,14 @@ function recursiveChunk(
           }
         }
       }
-      
+
       // Don't forget last chunk
       if (current.length >= minChars) {
         chunks.push(current);
       } else if (current && chunks.length > 0) {
         chunks[chunks.length - 1] += sep + current;
       }
-      
+
       // Apply overlap
       if (overlap > 0 && chunks.length > 1) {
         const overlapped: string[] = [chunks[0]];
@@ -130,11 +130,11 @@ function recursiveChunk(
         }
         return overlapped;
       }
-      
+
       return chunks;
     }
   }
-  
+
   // No separator worked, hard split
   const chunks: string[] = [];
   for (let i = 0; i < text.length; i += maxChars - overlap) {
@@ -201,32 +201,32 @@ function hierarchicalChunk(
 ): HierarchicalChunkResult[] {
   const results: HierarchicalChunkResult[] = [];
   const lines = text.split('\n');
-  
+
   // Track parent at each level (index 0 unused, 1-6 for heading levels)
   const parentStack: Array<{ id: string; context: string; level: number } | undefined> =
     new Array(7).fill(undefined);
-  
+
   let currentContent = '';
   let currentLevel = 0;
   let currentHeading = '';
   let chunkIndex = 0;
-  
+
   const generateTempId = () => `chunk_${chunkIndex++}`;
-  
+
   const flushContent = () => {
     if (!currentContent.trim()) return;
-    
+
     const contentText = currentHeading
       ? `${currentHeading}\n${currentContent.trim()}`
       : currentContent.trim();
-    
+
     if (contentText.length >= minChars || results.length === 0) {
       const chunkId = generateTempId();
-      
+
       // Find the closest parent at a higher level
       let parentId: string | undefined;
       let parentContext: string | undefined;
-      
+
       for (let level = currentLevel - 1; level >= 1; level--) {
         if (parentStack[level]) {
           parentId = parentStack[level]!.id;
@@ -236,7 +236,7 @@ function hierarchicalChunk(
           break;
         }
       }
-      
+
       results.push({
         text: contentText,
         level: currentLevel,
@@ -244,7 +244,7 @@ function hierarchicalChunk(
         parentContext: parentContext || undefined,
         chunkId
       });
-      
+
       // If this is a heading, register as parent for its level
       if (currentLevel > 0 && createParentChunks) {
         parentStack[currentLevel] = {
@@ -252,7 +252,7 @@ function hierarchicalChunk(
           context: contentText,
           level: currentLevel
         };
-        
+
         // Clear parents at deeper levels when we encounter a new heading
         for (let i = currentLevel + 1; i <= 6; i++) {
           parentStack[i] = undefined;
@@ -260,35 +260,35 @@ function hierarchicalChunk(
       }
     }
   };
-  
+
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const headingLevel = parseHeadingLevel(line);
-    
+
     if (headingLevel !== null) {
       // Flush previous content before starting new section
       flushContent();
-      
+
       currentHeading = line;
       currentLevel = headingLevel;
       currentContent = '';
-      
+
       // Look ahead to get content under this heading
       const contentLines: string[] = [];
       let j = i + 1;
-      
+
       while (j < lines.length) {
         const nextLine = lines[j];
         const nextHeadingLevel = parseHeadingLevel(nextLine);
-        
+
         if (nextHeadingLevel !== null) {
           break; // Stop at next heading
         }
-        
+
         contentLines.push(nextLine);
         j++;
       }
-      
+
       currentContent = contentLines.join('\n');
       i = j - 1; // Skip the lines we consumed
     } else {
@@ -298,10 +298,10 @@ function hierarchicalChunk(
       }
     }
   }
-  
+
   // Flush any remaining content
   flushContent();
-  
+
   return results;
 }
 
@@ -312,11 +312,11 @@ function paragraphChunk(text: string, maxChars: number, minChars: number): strin
   const paragraphs = text.split(/\n\n+/);
   const chunks: string[] = [];
   let current = "";
-  
+
   for (const para of paragraphs) {
     const trimmed = para.trim();
     if (!trimmed) continue;
-    
+
     if (current.length + trimmed.length + 2 <= maxChars) {
       current = current ? current + "\n\n" + trimmed : trimmed;
     } else {
@@ -324,9 +324,9 @@ function paragraphChunk(text: string, maxChars: number, minChars: number): strin
       current = trimmed;
     }
   }
-  
+
   if (current) chunks.push(current);
-  
+
   // Merge small chunks
   return mergeSmallChunks(chunks, minChars, maxChars);
 }
@@ -339,11 +339,11 @@ function headingChunk(text: string, maxChars: number, minChars: number): string[
   const chunks: string[] = [];
   let current = "";
   let currentHeading = "";
-  
+
   for (let i = 0; i < sections.length; i++) {
     const section = sections[i].trim();
     if (!section) continue;
-    
+
     if (section.startsWith("#")) {
       // It's a heading
       if (current) {
@@ -361,11 +361,11 @@ function headingChunk(text: string, maxChars: number, minChars: number): string[
       }
     }
   }
-  
+
   if (current) {
     chunks.push(currentHeading + "\n\n" + current);
   }
-  
+
   return mergeSmallChunks(chunks, minChars, maxChars);
 }
 
@@ -375,7 +375,7 @@ function headingChunk(text: string, maxChars: number, minChars: number): string[
 function mergeSmallChunks(chunks: string[], minChars: number, maxChars: number): string[] {
   const result: string[] = [];
   let buffer = "";
-  
+
   for (const chunk of chunks) {
     if (buffer.length + chunk.length + 2 <= maxChars) {
       buffer = buffer ? buffer + "\n\n" + chunk : chunk;
@@ -384,22 +384,215 @@ function mergeSmallChunks(chunks: string[], minChars: number, maxChars: number):
       buffer = chunk;
     }
   }
-  
+
   if (buffer) result.push(buffer);
-  
+
   return result;
+}
+
+interface ChunkBuildResult {
+  chunks: DocumentChunk[];
+  chunksBelowMin: number;
+  chunksAtMax: number;
+  totalChars: number;
+}
+
+function createChunkBuildResult(): ChunkBuildResult {
+  return {
+    chunks: [],
+    chunksBelowMin: 0,
+    chunksAtMax: 0,
+    totalChars: 0,
+  };
+}
+
+function createDocumentChunk(
+  inputPath: string,
+  docHash: string,
+  chunkText: string,
+  chunkIndex: number,
+  byteStart: number,
+  hierarchyLevel: number,
+  parentId?: string,
+  parentContext?: string
+): DocumentChunk {
+  const byteEnd = byteStart + Buffer.byteLength(chunkText, "utf-8");
+  return {
+    doc_id: docHash,
+    chunk_id: generateChunkId(docHash, byteStart, byteEnd),
+    chunk_index: chunkIndex,
+    hierarchy_level: hierarchyLevel,
+    parent_id: parentId,
+    parent_context: parentContext,
+    source: {
+      type: detectSourceType(inputPath),
+      uri: inputPath,
+      retrieved_at: now(),
+      content_hash: docHash,
+    },
+    content: {
+      text: chunkText,
+      text_hash: sha256(chunkText),
+      char_count: chunkText.length,
+      token_count_approx: estimateTokens(chunkText),
+    },
+    position: {
+      byte_start: byteStart,
+      byte_end: byteEnd,
+    },
+    metadata: {
+      content_type: detectContentType(inputPath),
+    },
+  };
+}
+
+function addChunk(
+  result: ChunkBuildResult,
+  chunk: DocumentChunk,
+  input: NormalizeChunkInput
+): void {
+  result.chunks.push(chunk);
+  result.totalChars += chunk.content.char_count;
+  if (chunk.content.char_count < input.min_chars) result.chunksBelowMin++;
+  if (chunk.content.char_count >= input.max_chars - 10) result.chunksAtMax++;
+}
+
+function sentenceChunks(text: string, maxChars: number): string[] {
+  const chunks: string[] = [];
+  let current = "";
+
+  for (const sentence of text.split(/(?<=[.!?])\s+/)) {
+    if (current.length + sentence.length + 1 <= maxChars) {
+      current = current ? current + " " + sentence : sentence;
+      continue;
+    }
+
+    if (current) chunks.push(current);
+    current = sentence;
+  }
+
+  if (current) chunks.push(current);
+  return chunks;
+}
+
+function chunkTextForStrategy(input: NormalizeChunkInput, text: string): string[] {
+  switch (input.strategy) {
+    case "recursive":
+      return recursiveChunk(text, input.max_chars, input.min_chars, input.overlap_chars, input.split_hierarchy);
+    case "by_paragraph":
+      return paragraphChunk(text, input.max_chars, input.min_chars);
+    case "by_heading":
+      return headingChunk(text, input.max_chars, input.min_chars);
+    case "fixed_chars": {
+      const chunks: string[] = [];
+      for (let i = 0; i < text.length; i += input.max_chars - input.overlap_chars) {
+        chunks.push(text.slice(i, i + input.max_chars));
+      }
+      return chunks;
+    }
+    case "by_sentence":
+      return sentenceChunks(text, input.max_chars);
+    case "by_page":
+      return text.split(/\f|\n{4,}/).filter(Boolean);
+    default:
+      return recursiveChunk(text, input.max_chars, input.min_chars, input.overlap_chars, input.split_hierarchy);
+  }
+}
+
+function buildHierarchicalChunks(
+  input: NormalizeChunkInput,
+  inputPath: string,
+  normalizedContent: string,
+  docHash: string
+): ChunkBuildResult {
+  const result = createChunkBuildResult();
+  const hierarchy = hierarchicalChunk(
+    normalizedContent,
+    input.max_chars,
+    input.min_chars,
+    input.overlap_chars,
+    input.create_parent_chunks,
+    input.parent_context_chars
+  );
+  const tempIdToRealId = new Map<string, string>();
+  let byteOffset = 0;
+
+  for (let i = 0; i < hierarchy.length; i++) {
+    const item = hierarchy[i];
+    const byteEnd = byteOffset + Buffer.byteLength(item.text, "utf-8");
+    const realChunkId = generateChunkId(docHash, byteOffset, byteEnd);
+    if (item.chunkId) tempIdToRealId.set(item.chunkId, realChunkId);
+
+    const parentId = item.parentId
+      ? tempIdToRealId.get(item.parentId)
+      : undefined;
+    addChunk(
+      result,
+      createDocumentChunk(
+        inputPath,
+        docHash,
+        item.text,
+        i,
+        byteOffset,
+        item.level,
+        parentId,
+        item.parentContext
+      ),
+      input
+    );
+    byteOffset = byteEnd;
+  }
+
+  return result;
+}
+
+function buildFlatChunks(
+  input: NormalizeChunkInput,
+  inputPath: string,
+  normalizedContent: string,
+  docHash: string
+): ChunkBuildResult {
+  const result = createChunkBuildResult();
+  const chunks = chunkTextForStrategy(input, normalizedContent);
+  let byteOffset = 0;
+
+  for (let i = 0; i < chunks.length; i++) {
+    const chunkText = chunks[i];
+    addChunk(
+      result,
+      createDocumentChunk(inputPath, docHash, chunkText, i, byteOffset, 0),
+      input
+    );
+    byteOffset += Buffer.byteLength(chunkText, "utf-8");
+  }
+
+  return result;
+}
+
+async function normalizeInputFile(
+  input: NormalizeChunkInput,
+  runDir: string,
+  inputPath: string
+): Promise<ChunkBuildResult | null> {
+  const fullPath = path.join(runDir, inputPath);
+  if (!(await pathExists(fullPath))) return null;
+
+  const content = await fs.readFile(fullPath, "utf-8");
+  const normalizedContent = normalizeText(content);
+  const docHash = sha256(normalizedContent);
+
+  return input.strategy === "hierarchical"
+    ? buildHierarchicalChunks(input, inputPath, normalizedContent, docHash)
+    : buildFlatChunks(input, inputPath, normalizedContent, docHash);
 }
 
 export async function normalizeChunk(input: NormalizeChunkInput): Promise<NormalizeChunkResult | ToolError> {
   const manager = getRunManager();
   const runDir = manager.getRunDir(input.run_id);
-  
-  // Ensure run exists with full infrastructure
   await manager.ensureRun(input.run_id);
   const normalizedDir = manager.getNormalizedDir(input.run_id);
-  
+
   try {
-    // Check output path
     const outputPath = path.join(normalizedDir, "chunks.jsonl");
     const configHash = hashConfig({
       strategy: input.strategy,
@@ -408,244 +601,41 @@ export async function normalizeChunk(input: NormalizeChunkInput): Promise<Normal
       overlap_chars: input.overlap_chars,
       split_hierarchy: input.split_hierarchy,
     });
-    
-    // Track stats
     let documentsProcessed = 0;
-    let chunksCreated = 0;
-    let chunksBelowMin = 0;
-    let chunksAtMax = 0;
-    let totalChars = 0;
-    
-    const allChunks: DocumentChunk[] = [];
-    
-    // Process each input file
+    const aggregate = createChunkBuildResult();
+
     for (const inputPath of input.input_paths.sort()) {
-      const fullPath = path.join(runDir, inputPath);
-      
-      if (!await pathExists(fullPath)) {
-        continue;
-      }
-      
-      // Read source content
-      const content = await fs.readFile(fullPath, "utf-8");
-      const normalizedContent = normalizeText(content);
-      const docHash = sha256(normalizedContent);
-      
+      const fileResult = await normalizeInputFile(input, runDir, inputPath);
+      if (!fileResult) continue;
+
       documentsProcessed++;
-      
-      // Check if using hierarchical strategy
-      if (input.strategy === "hierarchical") {
-        // Use hierarchical chunking with parent tracking
-        const hierarchicalResults = hierarchicalChunk(
-          normalizedContent,
-          input.max_chars,
-          input.min_chars,
-          input.overlap_chars,
-          input.create_parent_chunks,
-          input.parent_context_chars
-        );
-        
-        // Map temp chunk IDs to real chunk IDs
-        const tempIdToRealId = new Map<string, string>();
-        let byteOffset = 0;
-        
-        for (let i = 0; i < hierarchicalResults.length; i++) {
-          const result = hierarchicalResults[i];
-          const chunkText = result.text;
-          const textHash = sha256(chunkText);
-          const byteEnd = byteOffset + Buffer.byteLength(chunkText, "utf-8");
-          const realChunkId = generateChunkId(docHash, byteOffset, byteEnd);
-          
-          // Map temp ID to real ID
-          if (result.chunkId) {
-            tempIdToRealId.set(result.chunkId, realChunkId);
-          }
-          
-          // Resolve parent ID from temp ID to real ID
-          let resolvedParentId: string | undefined;
-          if (result.parentId) {
-            resolvedParentId = tempIdToRealId.get(result.parentId);
-          }
-          
-          const chunk: DocumentChunk = {
-            doc_id: docHash,
-            chunk_id: realChunkId,
-            chunk_index: i,
-            hierarchy_level: result.level,
-            parent_id: resolvedParentId,
-            parent_context: result.parentContext,
-            
-            source: {
-              type: detectSourceType(inputPath),
-              uri: inputPath,
-              retrieved_at: now(),
-              content_hash: docHash,
-            },
-            
-            content: {
-              text: chunkText,
-              text_hash: textHash,
-              char_count: chunkText.length,
-              token_count_approx: estimateTokens(chunkText),
-            },
-            
-            position: {
-              byte_start: byteOffset,
-              byte_end: byteEnd,
-            },
-            
-            metadata: {
-              content_type: detectContentType(inputPath),
-            },
-          };
-          
-          allChunks.push(chunk);
-          chunksCreated++;
-          totalChars += chunkText.length;
-          
-          if (chunkText.length < input.min_chars) {
-            chunksBelowMin++;
-          }
-          if (chunkText.length >= input.max_chars - 10) {
-            chunksAtMax++;
-          }
-          
-          byteOffset = byteEnd;
-        }
-      } else {
-        // Chunk based on strategy
-        let chunks: string[];
-        
-        switch (input.strategy) {
-          case "recursive":
-            chunks = recursiveChunk(
-              normalizedContent,
-              input.max_chars,
-              input.min_chars,
-              input.overlap_chars,
-              input.split_hierarchy
-            );
-            break;
-            
-          case "by_paragraph":
-            chunks = paragraphChunk(normalizedContent, input.max_chars, input.min_chars);
-            break;
-            
-          case "by_heading":
-            chunks = headingChunk(normalizedContent, input.max_chars, input.min_chars);
-            break;
-            
-          case "fixed_chars":
-            chunks = [];
-            for (let i = 0; i < normalizedContent.length; i += input.max_chars - input.overlap_chars) {
-              chunks.push(normalizedContent.slice(i, i + input.max_chars));
-            }
-            break;
-            
-          case "by_sentence":
-            const sentences = normalizedContent.split(/(?<=[.!?])\s+/);
-            chunks = [];
-            let current = "";
-            for (const sentence of sentences) {
-              if (current.length + sentence.length + 1 <= input.max_chars) {
-                current = current ? current + " " + sentence : sentence;
-              } else {
-                if (current) chunks.push(current);
-                current = sentence;
-              }
-            }
-            if (current) chunks.push(current);
-            break;
-            
-          case "by_page":
-            // For page-based, assume page markers or use fixed splits
-            chunks = normalizedContent.split(/\f|\n{4,}/).filter(Boolean);
-            break;
-            
-          default:
-            chunks = recursiveChunk(
-              normalizedContent,
-              input.max_chars,
-              input.min_chars,
-              input.overlap_chars,
-              input.split_hierarchy
-            );
-        }
-        
-        // Create DocumentChunk records
-        let byteOffset = 0;
-        for (let i = 0; i < chunks.length; i++) {
-          const chunkText = chunks[i];
-          const textHash = sha256(chunkText);
-          const byteEnd = byteOffset + Buffer.byteLength(chunkText, "utf-8");
-          
-          const chunk: DocumentChunk = {
-            doc_id: docHash,
-            chunk_id: generateChunkId(docHash, byteOffset, byteEnd),
-            chunk_index: i,
-            hierarchy_level: 0, // Non-hierarchical chunks get level 0
-            
-            source: {
-              type: detectSourceType(inputPath),
-              uri: inputPath,
-              retrieved_at: now(),
-              content_hash: docHash,
-            },
-            
-            content: {
-              text: chunkText,
-              text_hash: textHash,
-              char_count: chunkText.length,
-              token_count_approx: estimateTokens(chunkText),
-            },
-            
-            position: {
-              byte_start: byteOffset,
-              byte_end: byteEnd,
-            },
-            
-            metadata: {
-              content_type: detectContentType(inputPath),
-            },
-          };
-          
-          allChunks.push(chunk);
-          chunksCreated++;
-          totalChars += chunkText.length;
-          
-          if (chunkText.length < input.min_chars) {
-            chunksBelowMin++;
-          }
-          if (chunkText.length >= input.max_chars - 10) {
-            chunksAtMax++;
-          }
-          
-          byteOffset = byteEnd;
-        }
-      }
+      aggregate.chunks.push(...fileResult.chunks);
+      aggregate.chunksBelowMin += fileResult.chunksBelowMin;
+      aggregate.chunksAtMax += fileResult.chunksAtMax;
+      aggregate.totalChars += fileResult.totalChars;
     }
-    
-    // Write all chunks (sorted for determinism)
-    allChunks.sort((a, b) => {
-      const docCompare = a.doc_id.localeCompare(b.doc_id);
-      if (docCompare !== 0) return docCompare;
-      return a.chunk_index - b.chunk_index;
+
+    aggregate.chunks.sort((left, right) => {
+      const docCompare = left.doc_id.localeCompare(right.doc_id);
+      return docCompare !== 0 ? docCompare : left.chunk_index - right.chunk_index;
     });
-    
-    // Clear existing file and write fresh
+
     await fs.writeFile(outputPath, "");
-    await appendJsonl(outputPath, allChunks);
-    
+    await appendJsonl(outputPath, aggregate.chunks);
+
     return {
       success: true,
       output_path: "normalized/chunks.jsonl",
       stats: {
         documents_processed: documentsProcessed,
-        chunks_created: chunksCreated,
-        chunks_below_min: chunksBelowMin,
-        chunks_at_max: chunksAtMax,
-        avg_chunk_chars: chunksCreated > 0 ? Math.round(totalChars / chunksCreated) : 0,
-        total_chars: totalChars,
+        chunks_created: aggregate.chunks.length,
+        chunks_below_min: aggregate.chunksBelowMin,
+        chunks_at_max: aggregate.chunksAtMax,
+        avg_chunk_chars:
+          aggregate.chunks.length > 0
+            ? Math.round(aggregate.totalChars / aggregate.chunks.length)
+            : 0,
+        total_chars: aggregate.totalChars,
       },
       chunker_config: {
         strategy: input.strategy,
@@ -679,30 +669,30 @@ export interface NormalizeEnrichResult {
 export async function normalizeEnrich(input: NormalizeEnrichInput): Promise<NormalizeEnrichResult | ToolError> {
   const manager = getRunManager();
   const runDir = manager.getRunDir(input.run_id);
-  
+
   // Ensure run exists with full infrastructure
   await manager.ensureRun(input.run_id);
   const normalizedDir = manager.getNormalizedDir(input.run_id);
-  
+
   try {
     const chunksPath = path.join(runDir, input.chunks_path);
-    
+
     if (!await pathExists(chunksPath)) {
       return createToolError("CHUNK_ERROR", `Chunks file not found: ${input.chunks_path}`, {
         recoverable: false,
       });
     }
-    
+
     // Read chunks
     const chunks = await readJsonl<DocumentChunk>(chunksPath);
-    
+
     const stats = {
       chunks_enriched: 0,
       languages_detected: {} as Record<string, number>,
       tags_extracted: 0,
       sections_identified: 0,
     };
-    
+
     // Import language detection
     let detectLanguage: ((text: string) => string) | null = null;
     if (input.rules.detect_language) {
@@ -716,11 +706,11 @@ export async function normalizeEnrich(input: NormalizeEnrichInput): Promise<Norm
         // Language detection not available
       }
     }
-    
+
     // Process each chunk
     for (const chunk of chunks) {
       let modified = false;
-      
+
       // Language detection
       if (input.rules.detect_language && detectLanguage) {
         const lang = detectLanguage(chunk.content.text);
@@ -728,15 +718,15 @@ export async function normalizeEnrich(input: NormalizeEnrichInput): Promise<Norm
         stats.languages_detected[lang] = (stats.languages_detected[lang] || 0) + 1;
         modified = true;
       }
-      
+
       // Regex tag extraction
       if (input.rules.regex_tags?.length) {
         const tags: string[] = chunk.metadata.tags || [];
-        
+
         for (const rule of input.rules.regex_tags) {
           const regex = new RegExp(rule.pattern, rule.flags);
           const matches = chunk.content.text.matchAll(regex);
-          
+
           for (const match of matches) {
             const value = match[1] || match[0];
             const tag = `${rule.tag_name}:${value}`;
@@ -746,13 +736,13 @@ export async function normalizeEnrich(input: NormalizeEnrichInput): Promise<Norm
             }
           }
         }
-        
+
         if (tags.length) {
           chunk.metadata.tags = tags.sort();
           modified = true;
         }
       }
-      
+
       // Section detection
       if (input.rules.section_patterns?.length) {
         for (const pattern of input.rules.section_patterns) {
@@ -765,12 +755,12 @@ export async function normalizeEnrich(input: NormalizeEnrichInput): Promise<Norm
           }
         }
       }
-      
+
       // Taxonomy mapping
       if (input.rules.taxonomy) {
         const tags: string[] = chunk.metadata.tags || [];
         const textLower = chunk.content.text.toLowerCase();
-        
+
         for (const [category, terms] of Object.entries(input.rules.taxonomy)) {
           for (const term of terms) {
             if (textLower.includes(term.toLowerCase())) {
@@ -782,26 +772,26 @@ export async function normalizeEnrich(input: NormalizeEnrichInput): Promise<Norm
             }
           }
         }
-        
+
         if (tags.length) {
           chunk.metadata.tags = tags.sort();
           modified = true;
         }
       }
-      
+
       if (modified) {
         stats.chunks_enriched++;
       }
     }
-    
+
     // Write enriched chunks back
     const outputPath = path.join(normalizedDir, "chunks.enriched.jsonl");
     await fs.writeFile(outputPath, "");
     await appendJsonl(outputPath, chunks);
-    
+
     // Save enrichment report
     await writeJson(path.join(normalizedDir, "metadata_enrichment.json"), stats);
-    
+
     return {
       success: true,
       output_path: "normalized/chunks.enriched.jsonl",
@@ -833,50 +823,50 @@ export interface NormalizeDedupeResult {
 export async function normalizeDedupe(input: NormalizeDedupeInput): Promise<NormalizeDedupeResult | ToolError> {
   const manager = getRunManager();
   const runDir = manager.getRunDir(input.run_id);
-  
+
   // Ensure run exists with full infrastructure
   await manager.ensureRun(input.run_id);
   const normalizedDir = manager.getNormalizedDir(input.run_id);
-  
+
   try {
     const chunksPath = path.join(runDir, input.chunks_path);
-    
+
     if (!await pathExists(chunksPath)) {
       return createToolError("CHUNK_ERROR", `Chunks file not found: ${input.chunks_path}`, {
         recoverable: false,
       });
     }
-    
+
     // Read chunks
     const chunks = await readJsonl<DocumentChunk>(chunksPath);
-    
+
     const stats = {
       input_chunks: chunks.length,
       output_chunks: 0,
       duplicates_removed: 0,
       duplicate_groups: 0,
     };
-    
+
     const duplicateReport: Array<{
       kept: string;
       removed: string[];
       method: string;
     }> = [];
-    
+
     // Track seen content
     const seen = new Map<string, DocumentChunk>();
     const uniqueChunks: DocumentChunk[] = [];
-    
+
     if (input.method === "exact") {
       // Exact hash deduplication
       for (const chunk of chunks) {
-        const key = input.scope === "global" 
-          ? chunk.content.text_hash 
+        const key = input.scope === "global"
+          ? chunk.content.text_hash
           : `${chunk.doc_id}:${chunk.content.text_hash}`;
-        
+
         if (seen.has(key)) {
           stats.duplicates_removed++;
-          
+
           // Find or create duplicate group
           const existing = duplicateReport.find(r => r.kept === seen.get(key)!.chunk_id);
           if (existing) {
@@ -898,21 +888,21 @@ export async function normalizeDedupe(input: NormalizeDedupeInput): Promise<Norm
       // Simhash-based near-duplicate detection
       // Simplified implementation using text comparison
       const threshold = input.similarity_threshold;
-      
+
       for (const chunk of chunks) {
         let isDuplicate = false;
-        
+
         for (const existing of uniqueChunks) {
           // Simple similarity check (Jaccard-like)
           const similarity = computeTextSimilarity(
-            chunk.content.text, 
+            chunk.content.text,
             existing.content.text
           );
-          
+
           if (similarity >= threshold) {
             isDuplicate = true;
             stats.duplicates_removed++;
-            
+
             const report = duplicateReport.find(r => r.kept === existing.chunk_id);
             if (report) {
               report.removed.push(chunk.chunk_id);
@@ -927,20 +917,20 @@ export async function normalizeDedupe(input: NormalizeDedupeInput): Promise<Norm
             break;
           }
         }
-        
+
         if (!isDuplicate) {
           uniqueChunks.push(chunk);
         }
       }
     }
-    
+
     stats.output_chunks = uniqueChunks.length;
-    
+
     // Write deduplicated chunks
     const outputPath = path.join(normalizedDir, "chunks.deduped.jsonl");
     await fs.writeFile(outputPath, "");
     await appendJsonl(outputPath, uniqueChunks);
-    
+
     // Write dedupe report
     const reportPath = path.join(normalizedDir, "dedupe_report.json");
     await writeJson(reportPath, {
@@ -950,7 +940,7 @@ export async function normalizeDedupe(input: NormalizeDedupeInput): Promise<Norm
       stats,
       groups: duplicateReport,
     });
-    
+
     return {
       success: true,
       output_path: "normalized/chunks.deduped.jsonl",
@@ -1001,12 +991,12 @@ function computeTextSimilarity(a: string, b: string): number {
   // Simple character-based Jaccard similarity
   const setA = new Set(a.toLowerCase().split(/\s+/));
   const setB = new Set(b.toLowerCase().split(/\s+/));
-  
+
   let intersection = 0;
   for (const word of setA) {
     if (setB.has(word)) intersection++;
   }
-  
+
   const union = setA.size + setB.size - intersection;
   return union > 0 ? intersection / union : 0;
 }

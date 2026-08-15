@@ -251,7 +251,7 @@ function enforceMaxChunks(
   maxTotal: number
 ): typeof context {
   // Parent has highest priority
-  let count = context.parent ? 1 : 0;
+  const count = context.parent ? 1 : 0;
   
   if (count >= maxTotal) {
     return {

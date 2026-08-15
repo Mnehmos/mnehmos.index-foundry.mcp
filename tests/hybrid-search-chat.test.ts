@@ -1,52 +1,55 @@
 /**
- * Hybrid Search Chat Enhancement Tests
+ * Hybrid Search Tests
  *
- * These tests define the contract for hybrid search in the /chat endpoint.
- * Currently, the /chat endpoint uses keyword-only search (line 3148 in projects.ts),
- * which fails to retrieve:
- * - World's Largest Dungeon content after ~300 pages (D50, D55 rooms)
- * - SRD 5.2 creature stats despite being present in chunks
+ * These exercise the retrieval code that actually ships: src/templates/server/search.ts
+ * is copied verbatim into every exported project, and is imported here directly.
+ * There is no test-only search implementation.
  *
- * Feature Requirements:
- * - generateQueryEmbedding() function to embed user questions
- * - /chat endpoint must use hybrid search (semantic + keyword)
- * - Template generator must produce hybrid search code
- *
- * Integration Points:
- * - src/tools/projects.ts - generateMcpServerSource function (line ~2559)
- * - Generated server src/index.ts - /chat endpoint
+ * Semantic search is made deterministic and offline by giving each fixture chunk
+ * a unit vector on its own concept axis and injecting a fake `embed` that maps a
+ * query to the concept a real embedding model would put it near. That is what
+ * lets these tests assert the thing that matters: a query with no lexical overlap
+ * with its target chunk still retrieves it.
  */
 
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi, afterEach } from 'vitest';
 import * as fs from 'fs/promises';
 import * as path from 'path';
+
+import {
+  buildSearchContext,
+  searchKeyword,
+  searchSemantic,
+  searchHybrid,
+  runSearch,
+  detectAnchorTerms,
+  calculateQuerySpecificity,
+  applyAnchorBoost,
+  cosineSimilarity,
+  RRF_CONSTANT,
+  type Chunk,
+  type Vector,
+} from '../src/templates/server/search.js';
 
 // ============================================================================
 // Test Fixtures - D&D Content Samples
 // ============================================================================
 
-/**
- * Sample D50 room content from World's Largest Dungeon
- * This content uses D&D-specific terminology that keyword search misses
- */
 const D50_ROOM_CONTENT = `D50: The Chamber of Binding
-This circular chamber has a 30-foot ceiling. Ancient runes cover the walls, 
-glowing with a faint blue luminescence. In the center stands a stone pedestal 
+This circular chamber has a 30-foot ceiling. Ancient runes cover the walls,
+glowing with a faint blue luminescence. In the center stands a stone pedestal
 with manacles attached. The air feels thick with arcane energy.
 
 Creatures: 2 Shadow Demons (CR 4) lurk in the darkness near the ceiling.
 They attack anyone who disturbs the pedestal.
 
-Trap: The manacles are cursed. Anyone who touches them must make a DC 16 
+Trap: The manacles are cursed. Anyone who touches them must make a DC 16
 Wisdom save or become paralyzed for 1 minute.
 
 Treasure: Hidden compartment (DC 20 Investigation) contains a Ring of Protection +1.`;
 
-/**
- * Sample D55 room content  
- */
 const D55_ROOM_CONTENT = `D55: The Sunken Library
-Water covers the floor of this room to a depth of 2 feet. Ruined bookshelves 
+Water covers the floor of this room to a depth of 2 feet. Ruined bookshelves
 line the walls, their contents mostly destroyed by moisture.
 
 Creatures: 3 Water Weirds inhabit the flooded chamber.
@@ -57,9 +60,6 @@ Creatures in the water when activated take 4d6 lightning damage (DC 14 Dex half)
 
 Loot: One waterproof scroll case contains a Scroll of Water Breathing.`;
 
-/**
- * Sample SRD 5.2 creature content - Aboleth
- */
 const SRD_ABOLETH_CONTENT = `Aboleth
 Large aberration, lawful evil
 
@@ -67,23 +67,13 @@ Armor Class 17 (natural armor)
 Hit Points 135 (18d10 + 36)
 Speed 10 ft., swim 40 ft.
 
-STR 21 (+5) DEX 9 (-1) CON 15 (+2) INT 18 (+4) WIS 15 (+2) CHA 18 (+4)
-
 Saving Throws Con +6, Int +8, Wis +6
-Skills History +12, Perception +10
 Senses darkvision 120 ft., passive Perception 20
 Languages Deep Speech, telepathy 120 ft.
 Challenge 10 (5,900 XP)
 
-Amphibious. The aboleth can breathe air and water.
+Amphibious. The aboleth can breathe air and water.`;
 
-Mucous Cloud. While underwater, the aboleth is surrounded by transformative mucus.
-A creature that touches the aboleth or hits it with a melee attack while within 5 feet
-must make a DC 14 Constitution saving throw.`;
-
-/**
- * Sample SRD 5.2 creature content - Beholder
- */
 const SRD_BEHOLDER_CONTENT = `Beholder
 Large aberration, lawful evil
 
@@ -91,679 +81,627 @@ Armor Class 18 (natural armor)
 Hit Points 180 (19d10 + 76)
 Speed 0 ft., fly 20 ft. (hover)
 
-STR 10 (+0) DEX 14 (+2) CON 18 (+4) INT 17 (+3) WIS 15 (+2) CHA 17 (+3)
-
-Saving Throws Int +8, Wis +7, Cha +8
-Skills Perception +12
-Condition Immunities prone
 Senses darkvision 120 ft., passive Perception 22
-Languages Deep Speech, Undercommon
 Challenge 13 (10,000 XP)
 
 Antimagic Cone. The beholder's central eye creates an area of antimagic,
 as in the antimagic field spell, in a 150-foot-cone.`;
 
 // ============================================================================
-// Test Data Setup
+// Deterministic embedding fixtures
 // ============================================================================
 
-describe('Hybrid Search Chat Enhancement', () => {
-  const testProjectDir = path.join(process.cwd(), '.test-hybrid-search');
-  const dataDir = path.join(testProjectDir, 'data');
-  const srcDir = path.join(testProjectDir, 'src');
-  
-  // Mock chunks that simulate real D&D chatbot data
-  const testChunks = [
-    {
+/**
+ * Concept axes. Each fixture chunk sits on exactly one, so cosine similarity
+ * between a query vector and a chunk vector is 1 for the intended match and 0
+ * otherwise - a clean stand-in for a real embedding space.
+ */
+const CONCEPTS = ['d50', 'd55', 'aboleth', 'beholder', 'wld-intro', 'srd-intro'] as const;
+type Concept = (typeof CONCEPTS)[number];
+
+function conceptVector(concept: Concept): number[] {
+  return CONCEPTS.map((c) => (c === concept ? 1 : 0));
+}
+
+/** Blend two concepts, for queries that are genuinely between topics. */
+function blendedVector(a: Concept, b: Concept, weightA = 0.7): number[] {
+  const va = conceptVector(a);
+  const vb = conceptVector(b);
+  return va.map((v, i) => v * weightA + vb[i] * (1 - weightA));
+}
+
+const CHUNK_CONCEPTS: Array<{ chunk: Chunk; concept: Concept }> = [
+  {
+    concept: 'd50',
+    chunk: {
       chunk_id: 'chunk-d50-001',
       source_id: 'wld-source',
       text: D50_ROOM_CONTENT,
       position: { index: 300, start_char: 0, end_char: D50_ROOM_CONTENT.length },
       metadata: { source_name: "World's Largest Dungeon", room: 'D50' },
-      created_at: new Date().toISOString(),
     },
-    {
+  },
+  {
+    concept: 'd55',
+    chunk: {
       chunk_id: 'chunk-d55-001',
       source_id: 'wld-source',
       text: D55_ROOM_CONTENT,
       position: { index: 305, start_char: 0, end_char: D55_ROOM_CONTENT.length },
       metadata: { source_name: "World's Largest Dungeon", room: 'D55' },
-      created_at: new Date().toISOString(),
     },
-    {
+  },
+  {
+    concept: 'aboleth',
+    chunk: {
       chunk_id: 'chunk-aboleth-001',
       source_id: 'srd-source',
       text: SRD_ABOLETH_CONTENT,
       position: { index: 10, start_char: 0, end_char: SRD_ABOLETH_CONTENT.length },
       metadata: { source_name: 'SRD 5.2', creature: 'Aboleth' },
-      created_at: new Date().toISOString(),
     },
-    {
+  },
+  {
+    concept: 'beholder',
+    chunk: {
       chunk_id: 'chunk-beholder-001',
       source_id: 'srd-source',
       text: SRD_BEHOLDER_CONTENT,
       position: { index: 15, start_char: 0, end_char: SRD_BEHOLDER_CONTENT.length },
       metadata: { source_name: 'SRD 5.2', creature: 'Beholder' },
-      created_at: new Date().toISOString(),
     },
-    // Add some filler chunks to simulate a large index
-    {
+  },
+  {
+    concept: 'wld-intro',
+    chunk: {
       chunk_id: 'chunk-intro-001',
       source_id: 'wld-source',
-      text: 'Welcome to the World\'s Largest Dungeon, a massive adventure for characters level 1-20.',
-      position: { index: 0, start_char: 0, end_char: 100 },
+      text: "Welcome to the World's Largest Dungeon, a massive adventure for characters level 1-20.",
+      position: { index: 0, start_char: 0, end_char: 86 },
       metadata: { source_name: "World's Largest Dungeon" },
-      created_at: new Date().toISOString(),
     },
-    {
+  },
+  {
+    concept: 'srd-intro',
+    chunk: {
       chunk_id: 'chunk-srd-intro-001',
       source_id: 'srd-source',
-      text: 'System Reference Document 5.2 contains the core rules for the world\'s greatest roleplaying game.',
-      position: { index: 0, start_char: 0, end_char: 100 },
+      text: "System Reference Document 5.2 contains the core rules for the world's greatest roleplaying game.",
+      position: { index: 0, start_char: 0, end_char: 96 },
       metadata: { source_name: 'SRD 5.2' },
-      created_at: new Date().toISOString(),
     },
-  ];
-  
-  // Mock embeddings (1536 dimensions, normalized)
-  function createMockEmbedding(seed: number): number[] {
-    const embedding: number[] = [];
-    for (let i = 0; i < 1536; i++) {
-      // Create deterministic but varied embeddings based on seed
-      embedding.push(Math.sin(seed * (i + 1) * 0.001) * 0.1);
-    }
-    // Normalize
-    const norm = Math.sqrt(embedding.reduce((sum, v) => sum + v * v, 0));
-    return embedding.map(v => v / norm);
+  },
+];
+
+const testChunks: Chunk[] = CHUNK_CONCEPTS.map((c) => c.chunk);
+
+const testVectors: Vector[] = CHUNK_CONCEPTS.map(({ chunk, concept }) => ({
+  chunk_id: chunk.chunk_id,
+  embedding: conceptVector(concept),
+  model: 'text-embedding-3-small',
+}));
+
+/**
+ * Stands in for the embedding model: maps a natural-language query onto the
+ * concept a real model would place it near. Queries deliberately share no
+ * keywords with their target chunk.
+ */
+const QUERY_CONCEPTS: Array<{ match: RegExp; vector: () => number[] }> = [
+  { match: /cursed restraints|paralyz|shackle/i, vector: () => conceptVector('d50') },
+  { match: /demons lurking|darkness|shadow/i, vector: () => conceptVector('d50') },
+  { match: /chamber of binding|binding/i, vector: () => conceptVector('d50') },
+  { match: /flooded library|sunken|bookshel/i, vector: () => conceptVector('d55') },
+  { match: /underwater electricity|lightning trap|electrified/i, vector: () => conceptVector('d55') },
+  { match: /telepathic aberration|psychic/i, vector: () => conceptVector('aboleth') },
+  { match: /underwater.*monster|amphibious/i, vector: () => conceptVector('aboleth') },
+  { match: /floating eye|eye tyrant/i, vector: () => conceptVector('beholder') },
+  { match: /antimagic/i, vector: () => conceptVector('beholder') },
+  { match: /underwater/i, vector: () => blendedVector('aboleth', 'd55') },
+];
+
+function fakeEmbed(query: string): Promise<number[]> {
+  for (const { match, vector } of QUERY_CONCEPTS) {
+    if (match.test(query)) return Promise.resolve(vector());
   }
-  
-  const testVectors = testChunks.map((chunk, i) => ({
-    chunk_id: chunk.chunk_id,
-    embedding: createMockEmbedding(i * 100),
-    model: 'openai/text-embedding-3-small',
-    created_at: new Date().toISOString(),
-  }));
+  // Unknown query: equidistant from everything, so keyword drives the result.
+  return Promise.resolve(CONCEPTS.map(() => 0.1));
+}
+
+const ctx = buildSearchContext(testChunks, testVectors);
+const topIds = (results: Array<{ chunk: Chunk }>) => results.map((r) => r.chunk.chunk_id);
+
+// ============================================================================
+
+describe('Hybrid Search', () => {
+  describe('Semantic retrieval without lexical overlap', () => {
+    // Each of these queries shares no meaningful keyword with its target chunk.
+    // Keyword search alone cannot find them; this is the regression the hybrid
+    // path exists to prevent.
+    const cases: Array<{ query: string; expected: string; label: string }> = [
+      { label: 'D50 via "cursed restraints"', query: 'cursed restraints', expected: 'chunk-d50-001' },
+      { label: 'D50 via "demons lurking in darkness"', query: 'demons lurking in darkness', expected: 'chunk-d50-001' },
+      { label: 'D55 via "flooded library"', query: 'flooded library', expected: 'chunk-d55-001' },
+      { label: 'D55 via "underwater electricity trap"', query: 'underwater electricity trap', expected: 'chunk-d55-001' },
+      { label: 'Aboleth via "telepathic aberration"', query: 'telepathic aberration', expected: 'chunk-aboleth-001' },
+      { label: 'Beholder via "floating eye tyrant"', query: 'floating eye tyrant', expected: 'chunk-beholder-001' },
+      { label: 'Beholder via "antimagic field eye"', query: 'creature with antimagic field eye', expected: 'chunk-beholder-001' },
+    ];
+
+    for (const { query, expected, label } of cases) {
+      it(`retrieves ${label}`, async () => {
+        const { results, diagnostics } = await searchHybrid(ctx, query, 3, fakeEmbed);
+
+        expect(diagnostics.mode).toBe('hybrid');
+        expect(topIds(results)).toContain(expected);
+        expect(results[0].chunk.chunk_id).toBe(expected);
+      });
+    }
+
+    it('beats keyword-only search on a purely semantic query', async () => {
+      // "psychic" appears nowhere in the Aboleth chunk, so keyword search has
+      // nothing to match on; only the semantic half can find it.
+      const query = 'psychic domination';
+
+      const keywordOnly = searchKeyword(ctx, query, 3);
+      const { results: hybrid } = await searchHybrid(ctx, query, 3, fakeEmbed);
+
+      expect(topIds(keywordOnly)).not.toContain('chunk-aboleth-001');
+      expect(topIds(hybrid)).toContain('chunk-aboleth-001');
+    });
+  });
+
+  describe('Keyword search', () => {
+    it('scores by the fraction of query terms present', () => {
+      const results = searchKeyword(ctx, 'water lightning', 5);
+      expect(results[0].chunk.chunk_id).toBe('chunk-d55-001');
+      expect(results[0].score).toBe(1); // both terms present
+    });
+
+    it('returns nothing for an empty query', () => {
+      expect(searchKeyword(ctx, '', 5)).toEqual([]);
+      expect(searchKeyword(ctx, '   ', 5)).toEqual([]);
+    });
+
+    it('excludes chunks with no matching terms', () => {
+      const results = searchKeyword(ctx, 'beholder', 10);
+      expect(topIds(results)).toEqual(['chunk-beholder-001']);
+    });
+  });
+
+  describe('Semantic search', () => {
+    it('ranks by cosine similarity to the query vector', () => {
+      const results = searchSemantic(ctx, conceptVector('beholder'), 3);
+      expect(results[0].chunk_id).toBe('chunk-beholder-001');
+      expect(results[0].score).toBeCloseTo(1, 5);
+      expect(results[1].score).toBeCloseTo(0, 5);
+    });
+
+    it('returns nothing for an empty vector', () => {
+      expect(searchSemantic(ctx, [], 5)).toEqual([]);
+    });
+
+    it('treats mismatched dimensions as zero similarity', () => {
+      expect(cosineSimilarity([1, 0, 0], [1, 0])).toBe(0);
+    });
+
+    it('treats a zero vector as zero similarity rather than NaN', () => {
+      expect(cosineSimilarity([0, 0, 0], [1, 2, 3])).toBe(0);
+    });
+  });
+
+  describe('Anchor terms', () => {
+    it('detects room codes, long numbers and quoted phrases', () => {
+      expect(detectAnchorTerms('what is in D50')).toContain('D50');
+      expect(detectAnchorTerms('page 300 of the dungeon')).toContain('300');
+      expect(detectAnchorTerms('tell me about "myrmarch"')).toContain('myrmarch');
+    });
+
+    it('dedupes repeated anchors', () => {
+      expect(detectAnchorTerms('D50 and D50 again')).toEqual(['D50']);
+    });
+
+    it('boosts an exact identifier match above a bare mention', () => {
+      const withColon: Chunk = { ...testChunks[0] };            // contains "D50:"
+      const bareMention: Chunk = {
+        ...testChunks[1],
+        chunk_id: 'bare',
+        text: 'The corridor leads onward toward D50 eventually.',
+      };
+
+      const boosted = applyAnchorBoost(
+        [
+          { chunk: bareMention, score: 0.5 },
+          { chunk: withColon, score: 0.5 },
+        ],
+        ['D50']
+      );
+
+      // "D50:" earns the 0.4 exact-pattern boost; the bare mention earns 0.15.
+      expect(boosted[0].chunk.chunk_id).toBe('chunk-d50-001');
+      expect(boosted[0].score).toBeCloseTo(0.9, 5);
+      expect(boosted[1].score).toBeCloseTo(0.65, 5);
+    });
+
+    it('leaves results untouched when there are no anchors', () => {
+      const input = [{ chunk: testChunks[0], score: 0.5 }];
+      expect(applyAnchorBoost(input, [])).toBe(input);
+    });
+
+    it('ranks the anchored chunk first in a full hybrid search', async () => {
+      const { results, diagnostics } = await searchHybrid(ctx, 'what happens in D50', 3, fakeEmbed);
+      expect(diagnostics.anchorTerms).toContain('D50');
+      expect(results[0].chunk.chunk_id).toBe('chunk-d50-001');
+    });
+  });
+
+  describe('Adaptive weighting', () => {
+    it('weights keyword search more heavily as anchors accumulate', async () => {
+      // One anchor lands exactly at parity (0.3 + 0.2); two tips it to 0.7.
+      const one = await searchHybrid(ctx, 'D50', 3, fakeEmbed);
+      expect(one.diagnostics.keywordWeight).toBeCloseTo(0.5, 10);
+
+      const two = await searchHybrid(ctx, 'compare D50 and D55', 3, fakeEmbed);
+      expect(two.diagnostics.anchorTerms).toEqual(expect.arrayContaining(['D50', 'D55']));
+      expect(two.diagnostics.keywordWeight).toBeCloseTo(0.7, 10);
+      expect(two.diagnostics.keywordWeight).toBeGreaterThan(two.diagnostics.semanticWeight);
+    });
+
+    it('weights semantic search more heavily for short specific non-anchor queries', async () => {
+      const { diagnostics } = await searchHybrid(ctx, 'ancient glowing runes', 3, fakeEmbed);
+      expect(diagnostics.specificity).toBeGreaterThan(0);
+      expect(diagnostics.semanticWeight).toBeGreaterThan(diagnostics.keywordWeight);
+    });
+
+    it('stays balanced for long broad queries with no anchors', async () => {
+      const { diagnostics } = await searchHybrid(
+        ctx,
+        'tell me about what kind of creatures live in the dungeon',
+        3,
+        fakeEmbed
+      );
+      // Broad words cancel the length signal, leaving specificity at 0.
+      expect(diagnostics.specificity).toBe(0);
+      expect(diagnostics.keywordWeight).toBeCloseTo(0.5, 10);
+      expect(diagnostics.semanticWeight).toBeCloseTo(0.5, 10);
+    });
+
+    it('scores broad "what/how/about" queries as less specific', () => {
+      const broad = calculateQuerySpecificity('tell me about the dungeon layout please', []);
+      const specific = calculateQuerySpecificity('D50 manacles', ['D50']);
+      expect(specific).toBeGreaterThan(broad);
+    });
+
+    it('keeps weights summing to 1', async () => {
+      const { diagnostics } = await searchHybrid(ctx, 'anything at all', 3, fakeEmbed);
+      expect(diagnostics.keywordWeight + diagnostics.semanticWeight).toBeCloseTo(1, 10);
+    });
+  });
+
+  describe('Degradation when embedding is unavailable', () => {
+    it('falls back to keyword-only when embedding throws', async () => {
+      const failing = () => Promise.reject(new Error('API key missing'));
+      const { results, diagnostics } = await searchHybrid(ctx, 'water lightning', 3, failing);
+
+      expect(diagnostics.mode).toBe('keyword');
+      expect(results[0].chunk.chunk_id).toBe('chunk-d55-001');
+    });
+
+    it('does not call the embedder at all when there are no vectors', async () => {
+      const noVectors = buildSearchContext(testChunks, []);
+      const embed = vi.fn(fakeEmbed);
+
+      const { diagnostics } = await searchHybrid(noVectors, 'water', 3, embed);
+
+      expect(embed).not.toHaveBeenCalled();
+      expect(diagnostics.mode).toBe('keyword');
+    });
+
+    it('still applies anchor boosting in the keyword-only path', async () => {
+      const failing = () => Promise.reject(new Error('offline'));
+      const { results } = await searchHybrid(ctx, 'D50 chamber', 3, failing);
+      expect(results[0].chunk.chunk_id).toBe('chunk-d50-001');
+    });
+  });
+
+  describe('runSearch (caller-supplied vector)', () => {
+    it('uses keyword mode by default', () => {
+      const results = runSearch(ctx, { query: 'beholder', mode: 'keyword', topK: 5 });
+      expect(topIds(results)).toEqual(['chunk-beholder-001']);
+    });
+
+    it('throws when semantic mode is used without a vector', () => {
+      expect(() => runSearch(ctx, { query: 'x', mode: 'semantic', topK: 5 })).toThrow(
+        /query_vector required/
+      );
+    });
+
+    it('falls back to keyword when hybrid mode is used without a vector', () => {
+      const results = runSearch(ctx, { query: 'beholder', mode: 'hybrid', topK: 5 });
+      expect(topIds(results)).toEqual(['chunk-beholder-001']);
+    });
+
+    it('fuses both lists with RRF when a vector is supplied', () => {
+      const results = runSearch(ctx, {
+        query: 'aboleth',
+        queryVector: conceptVector('aboleth'),
+        mode: 'hybrid',
+        topK: 5,
+      });
+
+      expect(results[0].chunk.chunk_id).toBe('chunk-aboleth-001');
+      // Rank 1 in both lists: 2 * 1/(60 + 0 + 1)
+      expect(results[0].score).toBeCloseTo(2 / (RRF_CONSTANT + 1), 10);
+    });
+
+    it('uses k=60 as the RRF constant', () => {
+      expect(RRF_CONSTANT).toBe(60);
+    });
+  });
+
+  describe('Result shape', () => {
+    it('returns the full chunk with each score', async () => {
+      const { results } = await searchHybrid(ctx, 'flooded library', 2, fakeEmbed);
+
+      expect(results.length).toBeGreaterThan(0);
+      for (const r of results) {
+        expect(r.chunk.chunk_id).toBeDefined();
+        expect(r.chunk.text).toBeDefined();
+        expect(r.chunk.source_id).toBeDefined();
+        expect(r.chunk.position).toBeDefined();
+        expect(typeof r.score).toBe('number');
+        expect(Number.isNaN(r.score)).toBe(false);
+      }
+    });
+
+    it('returns results in descending score order', async () => {
+      const { results } = await searchHybrid(ctx, 'water creatures dungeon', 6, fakeEmbed);
+      const scores = results.map((r) => r.score);
+      expect(scores).toEqual([...scores].sort((a, b) => b - a));
+    });
+
+    it('respects topK', async () => {
+      const { results } = await searchHybrid(ctx, 'dungeon', 2, fakeEmbed);
+      expect(results.length).toBeLessThanOrEqual(2);
+    });
+  });
+
+  describe('Edge cases', () => {
+    it('handles an empty query without throwing', async () => {
+      const { results } = await searchHybrid(ctx, '', 5, fakeEmbed);
+      expect(Array.isArray(results)).toBe(true);
+    });
+
+    it('handles game-mechanics notation', async () => {
+      const { results } = await searchHybrid(ctx, 'DC 16 Wisdom saving throw', 3, fakeEmbed);
+      expect(topIds(results)).toContain('chunk-d50-001');
+    });
+
+    it('handles a very long query', async () => {
+      const long = 'water '.repeat(200) + 'lightning';
+      const { results } = await searchHybrid(ctx, long, 3, fakeEmbed);
+      expect(results.length).toBeGreaterThan(0);
+    });
+
+    it('returns the same chunk for different phrasings of one question', async () => {
+      const a = await searchHybrid(ctx, 'flooded library', 3, fakeEmbed);
+      const b = await searchHybrid(ctx, 'the sunken bookshelves room', 3, fakeEmbed);
+      expect(a.results[0].chunk.chunk_id).toBe('chunk-d55-001');
+      expect(b.results[0].chunk.chunk_id).toBe('chunk-d55-001');
+    });
+
+    it('completes a small-corpus search well under 100ms', async () => {
+      const start = performance.now();
+      await searchHybrid(ctx, 'water lightning trap', 5, fakeEmbed);
+      expect(performance.now() - start).toBeLessThan(100);
+    });
+  });
+});
+
+// ============================================================================
+// Integration: the chat flow used by the exported server
+// ============================================================================
+
+describe('Chat flow integration', () => {
+  const testProjectDir = path.join(process.cwd(), '.test-hybrid-search');
+  const dataDir = path.join(testProjectDir, 'data');
 
   beforeAll(async () => {
-    // Setup test project directory
     await fs.mkdir(dataDir, { recursive: true });
-    await fs.mkdir(srcDir, { recursive: true });
-    
-    // Write test chunks
-    const chunksContent = testChunks.map(c => JSON.stringify(c)).join('\n');
-    await fs.writeFile(path.join(dataDir, 'chunks.jsonl'), chunksContent, 'utf-8');
-    
-    // Write test vectors
-    const vectorsContent = testVectors.map(v => JSON.stringify(v)).join('\n');
-    await fs.writeFile(path.join(dataDir, 'vectors.jsonl'), vectorsContent, 'utf-8');
-    
-    // Write test manifest
-    const manifest = {
-      project_id: 'test-dnd-chatbot',
-      name: 'D&D Chatbot Test',
-      embedding_model: { provider: 'openai', model_name: 'text-embedding-3-small', api_key_env: 'OPENAI_API_KEY' },
-      chunk_config: { strategy: 'recursive', max_chars: 1500, overlap_chars: 150 },
-      stats: { sources_count: 2, chunks_count: testChunks.length, vectors_count: testVectors.length },
-    };
-    await fs.writeFile(path.join(testProjectDir, 'project.json'), JSON.stringify(manifest, null, 2));
-    
-    // Write test sources
-    const sources = [
-      { source_id: 'wld-source', type: 'pdf', uri: 'worlds-largest-dungeon.pdf', source_name: "World's Largest Dungeon", status: 'completed' },
-      { source_id: 'srd-source', type: 'pdf', uri: 'srd-5.2.pdf', source_name: 'SRD 5.2', status: 'completed' },
-    ];
-    const sourcesContent = sources.map(s => JSON.stringify(s)).join('\n');
-    await fs.writeFile(path.join(testProjectDir, 'sources.jsonl'), sourcesContent, 'utf-8');
+
+    await fs.writeFile(
+      path.join(dataDir, 'chunks.jsonl'),
+      testChunks.map((c) => JSON.stringify({ ...c, created_at: new Date().toISOString() })).join('\n'),
+      'utf-8'
+    );
+    await fs.writeFile(
+      path.join(dataDir, 'vectors.jsonl'),
+      testVectors.map((v) => JSON.stringify({ ...v, created_at: new Date().toISOString() })).join('\n'),
+      'utf-8'
+    );
+    await fs.writeFile(
+      path.join(testProjectDir, 'project.json'),
+      JSON.stringify(
+        {
+          project_id: 'test-dnd-chatbot',
+          name: 'D&D Chatbot Test',
+          embedding_model: {
+            provider: 'openai',
+            model_name: 'text-embedding-3-small',
+            api_key_env: 'TEST_EMBEDDING_KEY',
+          },
+          chunk_config: { strategy: 'recursive', max_chars: 1500, overlap_chars: 150 },
+          stats: { sources_count: 2, chunks_count: testChunks.length, vectors_count: testVectors.length },
+        },
+        null,
+        2
+      )
+    );
+    await fs.writeFile(
+      path.join(testProjectDir, 'sources.jsonl'),
+      [
+        { source_id: 'wld-source', type: 'pdf', uri: 'wld.pdf', source_name: "World's Largest Dungeon", status: 'completed' },
+        { source_id: 'srd-source', type: 'pdf', uri: 'srd-5.2.pdf', source_name: 'SRD 5.2', status: 'completed' },
+      ]
+        .map((s) => JSON.stringify(s))
+        .join('\n'),
+      'utf-8'
+    );
   });
 
   afterAll(async () => {
-    // Cleanup test directory
+    await fs.rm(testProjectDir, { recursive: true, force: true }).catch(() => {});
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    delete process.env.TEST_EMBEDDING_KEY;
+  });
+
+  /** Intercept the embeddings HTTP call so no network request is made. */
+  function stubEmbeddingApi(vector: number[]) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(JSON.stringify({ data: [{ embedding: vector }] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      )
+    );
+  }
+
+  it('uses hybrid search when an API key is configured', async () => {
+    process.env.TEST_EMBEDDING_KEY = 'test-key';
+    stubEmbeddingApi(conceptVector('aboleth'));
+
+    const { chatWithHybridSearch } = await import('../src/tools/projects.js');
+    const result = await chatWithHybridSearch({
+      question: 'telepathic aberration',
+      projectDir: testProjectDir,
+      topK: 3,
+    });
+
+    expect(result.searchMode).toBe('hybrid');
+    expect(result.sources[0].chunk_id).toBe('chunk-aboleth-001');
+    expect(result.context).toContain('Aboleth');
+  });
+
+  it('honours the project\'s configured api_key_env, not a hardcoded one', async () => {
+    // OPENAI_API_KEY deliberately unset; the project declares TEST_EMBEDDING_KEY.
+    const previous = process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    process.env.TEST_EMBEDDING_KEY = 'test-key';
+    stubEmbeddingApi(conceptVector('d55'));
+
     try {
-      await fs.rm(testProjectDir, { recursive: true, force: true });
-    } catch {
-      // Ignore cleanup errors
+      const { chatWithHybridSearch } = await import('../src/tools/projects.js');
+      const result = await chatWithHybridSearch({
+        question: 'flooded library',
+        projectDir: testProjectDir,
+        topK: 3,
+      });
+
+      expect(result.searchMode).toBe('hybrid');
+      expect(result.sources[0].chunk_id).toBe('chunk-d55-001');
+    } finally {
+      if (previous !== undefined) process.env.OPENAI_API_KEY = previous;
     }
   });
 
-  // ============================================================================
-  // D50 Room Retrieval Tests
-  // ============================================================================
+  it('degrades to keyword search when no API key is present', async () => {
+    delete process.env.TEST_EMBEDDING_KEY;
 
-  describe('D50 Room Retrieval', () => {
-    it('should retrieve D50 room content when asking about "Chamber of Binding"', async () => {
-      // This test demonstrates the keyword search limitation
-      // The query "What creatures are in the Chamber of Binding?" should find D50
-      // but keyword search may fail if terms don't match exactly
-      
-      const query = 'What creatures are in the Chamber of Binding?';
-      
-      // Import the function that should exist but doesn't yet
-      // This will cause the test to fail immediately
-      const { searchHybridForChat } = await import('../src/tools/projects.js');
-      
-      const results = await searchHybridForChat({
-        query,
-        chunks: testChunks,
-        vectors: testVectors,
-        topK: 5,
-      });
-      
-      // Expect D50 content to be in top results
-      const d50Found = results.some(r => 
-        r.chunk_id === 'chunk-d50-001' || 
-        r.text.includes('D50') || 
-        r.text.includes('Chamber of Binding')
-      );
-      
-      expect(d50Found).toBe(true);
-      expect(results[0].text).toContain('Shadow Demons');
+    const { chatWithHybridSearch } = await import('../src/tools/projects.js');
+    const result = await chatWithHybridSearch({
+      question: 'water lightning',
+      projectDir: testProjectDir,
+      topK: 3,
     });
 
-    it('should retrieve D50 room when asking semantic question about "cursed restraints"', async () => {
-      // Semantic query that won't match keywords but should match meaning
-      const query = 'Where can I find cursed restraints that paralyze adventurers?';
-      
-      const { searchHybridForChat } = await import('../src/tools/projects.js');
-      
-      const results = await searchHybridForChat({
-        query,
-        chunks: testChunks,
-        vectors: testVectors,
-        topK: 5,
-      });
-      
-      // D50 has cursed manacles that paralyze - should be found via semantic search
-      const d50Found = results.some(r => 
-        r.text.includes('manacles') || 
-        r.text.includes('paralyzed')
-      );
-      
-      expect(d50Found).toBe(true);
+    expect(result.searchMode).toBe('keyword');
+    expect(result.sources[0].chunk_id).toBe('chunk-d55-001');
+  });
+
+  it('builds context with source separators', async () => {
+    delete process.env.TEST_EMBEDDING_KEY;
+
+    const { chatWithHybridSearch } = await import('../src/tools/projects.js');
+    const result = await chatWithHybridSearch({
+      question: 'water',
+      projectDir: testProjectDir,
+      topK: 3,
     });
 
-    it('should retrieve D50 room when asking about "demons lurking in darkness"', async () => {
-      const query = 'Tell me about demons that lurk in darkness near ceilings';
-      
-      const { searchHybridForChat } = await import('../src/tools/projects.js');
-      
-      const results = await searchHybridForChat({
-        query,
-        chunks: testChunks,
-        vectors: testVectors,
-        topK: 5,
-      });
-      
-      // D50 has Shadow Demons lurking near ceiling
-      const d50Found = results.some(r => r.text.includes('Shadow Demons'));
-      
-      expect(d50Found).toBe(true);
+    expect(result.context.length).toBeGreaterThan(0);
+    if (result.sources.length > 1) {
+      expect(result.context).toContain('---');
+    }
+  });
+
+  it('throws a clear error for a missing project', async () => {
+    const { chatWithHybridSearch } = await import('../src/tools/projects.js');
+    await expect(
+      chatWithHybridSearch({ question: 'x', projectDir: path.join(process.cwd(), '.no-such-project') })
+    ).rejects.toThrow(/Project not found/);
+  });
+});
+
+// ============================================================================
+// The exported server template
+// ============================================================================
+
+describe('Exported server template', () => {
+  it('is a real source file, not a generated string', async () => {
+    const { generateMcpServerSourceForTest } = await import('../src/tools/projects.js');
+    const source = generateMcpServerSourceForTest();
+
+    // Delegates retrieval to the shared module rather than redefining it.
+    expect(source).toContain('from "./search.js"');
+    expect(source).toContain('searchHybrid');
+    expect(source).not.toContain('function searchKeyword');
+  });
+
+  it('reads its embedding config at runtime instead of hardcoding a model', async () => {
+    const { generateMcpServerSourceForTest } = await import('../src/tools/projects.js');
+    const source = generateMcpServerSourceForTest();
+
+    expect(source).toContain('embeddingModel.model_name');
+    expect(source).toContain('process.env[embeddingModel.api_key_env]');
+    // The regression this guards: a literal model name baked into the request.
+    expect(source).not.toMatch(/model:\s*"text-embedding-3-small"/);
+    // The LLM completion call may still default to OPENAI_API_KEY, but the
+    // embedding path - the one that has to match the index - must not.
+    const fnStart = source.indexOf('async function generateQueryEmbedding');
+    const fnEnd = source.indexOf('// ====', fnStart);
+    const embeddingFn = source.slice(fnStart, fnEnd);
+
+    expect(embeddingFn).toContain('process.env[embeddingModel.api_key_env]');
+    expect(embeddingFn).not.toContain('process.env.OPENAI_API_KEY');
+  });
+
+  it('warns when the index model and query model disagree', async () => {
+    const { generateMcpServerSourceForTest } = await import('../src/tools/projects.js');
+    expect(generateMcpServerSourceForTest()).toContain('WARNING: index was built with');
+  });
+
+  it('emits a runtime config carrying the export-time options', async () => {
+    const { buildServerConfigForTest } = await import('../src/tools/projects.js');
+    const config = JSON.parse(buildServerConfigForTest('my-server', 'My description', 9090, false));
+
+    expect(config).toEqual({
+      server_name: 'my-server',
+      server_description: 'My description',
+      port: 9090,
+      include_http: false,
     });
   });
 
-  // ============================================================================
-  // D55 Room Retrieval Tests
-  // ============================================================================
+  it('keeps HTTP opt-in so stdio launches do not claim a port', async () => {
+    const { shouldStartHttp } = await import('../src/templates/server/runtime.js');
 
-  describe('D55 Room Retrieval', () => {
-    it('should retrieve D55 room when asking about "flooded library"', async () => {
-      const query = 'What hazards are in the flooded library?';
-      
-      const { searchHybridForChat } = await import('../src/tools/projects.js');
-      
-      const results = await searchHybridForChat({
-        query,
-        chunks: testChunks,
-        vectors: testVectors,
-        topK: 5,
-      });
-      
-      const d55Found = results.some(r => 
-        r.chunk_id === 'chunk-d55-001' || 
-        r.text.includes('Sunken Library') ||
-        r.text.includes('Water Weirds')
-      );
-      
-      expect(d55Found).toBe(true);
-    });
-
-    it('should retrieve D55 when asking about "underwater electricity trap"', async () => {
-      // Semantic query - "electricity trap" should match "lightning glyph"
-      const query = 'Is there a room with an underwater electricity trap?';
-      
-      const { searchHybridForChat } = await import('../src/tools/projects.js');
-      
-      const results = await searchHybridForChat({
-        query,
-        chunks: testChunks,
-        vectors: testVectors,
-        topK: 5,
-      });
-      
-      const d55Found = results.some(r => r.text.includes('lightning glyph'));
-      
-      expect(d55Found).toBe(true);
-    });
-  });
-
-  // ============================================================================
-  // SRD Creature Retrieval Tests
-  // ============================================================================
-
-  describe('SRD Creature Retrieval', () => {
-    it('should retrieve Aboleth stats when asking about "telepathic aberration"', async () => {
-      // Semantic query - "telepathic aberration" should match Aboleth
-      const query = 'What are the stats for a telepathic aberration that transforms creatures with mucus?';
-      
-      const { searchHybridForChat } = await import('../src/tools/projects.js');
-      
-      const results = await searchHybridForChat({
-        query,
-        chunks: testChunks,
-        vectors: testVectors,
-        topK: 5,
-      });
-      
-      const abolethFound = results.some(r => 
-        r.text.includes('Aboleth') || 
-        r.text.includes('Mucous Cloud')
-      );
-      
-      expect(abolethFound).toBe(true);
-    });
-
-    it('should retrieve Aboleth when asking "underwater psychic monster"', async () => {
-      const query = 'What is the CR of the underwater psychic monster with telepathy?';
-      
-      const { searchHybridForChat } = await import('../src/tools/projects.js');
-      
-      const results = await searchHybridForChat({
-        query,
-        chunks: testChunks,
-        vectors: testVectors,
-        topK: 5,
-      });
-      
-      const abolethFound = results.some(r => 
-        r.text.includes('Challenge 10') && r.text.includes('Aboleth')
-      );
-      
-      expect(abolethFound).toBe(true);
-    });
-
-    it('should retrieve Beholder stats when asking about "floating eye tyrant"', async () => {
-      const query = 'What can nullify magic in a cone shape? Stats for the floating eye tyrant?';
-      
-      const { searchHybridForChat } = await import('../src/tools/projects.js');
-      
-      const results = await searchHybridForChat({
-        query,
-        chunks: testChunks,
-        vectors: testVectors,
-        topK: 5,
-      });
-      
-      const beholderFound = results.some(r => 
-        r.text.includes('Beholder') || 
-        r.text.includes('Antimagic Cone')
-      );
-      
-      expect(beholderFound).toBe(true);
-    });
-
-    it('should retrieve Beholder when asking about "creature with antimagic field eye"', async () => {
-      const query = 'Which creature has an eye that creates antimagic field?';
-      
-      const { searchHybridForChat } = await import('../src/tools/projects.js');
-      
-      const results = await searchHybridForChat({
-        query,
-        chunks: testChunks,
-        vectors: testVectors,
-        topK: 5,
-      });
-      
-      const beholderFound = results.some(r => r.text.includes('Antimagic Cone'));
-      
-      expect(beholderFound).toBe(true);
-    });
-  });
-
-  // ============================================================================
-  // Query Embedding Generation Tests
-  // ============================================================================
-
-  describe('Query Embedding Generation', () => {
-    it('should have generateQueryEmbedding function exported', async () => {
-      // This function must exist for hybrid search to work
-      const { generateQueryEmbedding } = await import('../src/tools/projects.js');
-      
-      expect(generateQueryEmbedding).toBeDefined();
-      expect(typeof generateQueryEmbedding).toBe('function');
-    });
-
-    // Integration test - requires real OpenAI API key
-    // Skip if OPENAI_API_KEY is not a real key (starts with 'sk-')
-    const hasRealApiKey = process.env.OPENAI_API_KEY?.startsWith('sk-') ?? false;
-    
-    it.skipIf(!hasRealApiKey)('should generate 1536-dimensional embedding for query text', async () => {
-      const { generateQueryEmbedding } = await import('../src/tools/projects.js');
-      
-      const query = 'What creatures are in the Chamber of Binding?';
-      
-      const embedding = await generateQueryEmbedding({
-        text: query,
-        model: { provider: 'openai', model_name: 'text-embedding-3-small', api_key_env: 'OPENAI_API_KEY' },
-      });
-      
-      expect(embedding).toBeInstanceOf(Array);
-      expect(embedding.length).toBe(1536);
-    });
-
-    it.skipIf(!hasRealApiKey)('should return normalized embedding vector', async () => {
-      const { generateQueryEmbedding } = await import('../src/tools/projects.js');
-      
-      const query = 'Test query for normalization';
-      
-      const embedding = await generateQueryEmbedding({
-        text: query,
-        model: { provider: 'openai', model_name: 'text-embedding-3-small', api_key_env: 'OPENAI_API_KEY' },
-      });
-      
-      // Check L2 norm is approximately 1
-      const magnitude = Math.sqrt(embedding.reduce((sum: number, v: number) => sum + v * v, 0));
-      expect(magnitude).toBeCloseTo(1, 1);
-    });
-
-    it('should throw error when API key is missing', async () => {
-      const { generateQueryEmbedding } = await import('../src/tools/projects.js');
-      
-      // Remove API key
-      delete process.env.OPENAI_API_KEY;
-      
-      await expect(generateQueryEmbedding({
-        text: 'Test query',
-        model: { provider: 'openai', model_name: 'text-embedding-3-small', api_key_env: 'OPENAI_API_KEY' },
-      })).rejects.toThrow('API key');
-    });
-  });
-
-  // ============================================================================
-  // Hybrid Search Function Tests
-  // ============================================================================
-
-  describe('Hybrid Search Function', () => {
-    it('should export searchHybridForChat function', async () => {
-      const { searchHybridForChat } = await import('../src/tools/projects.js');
-      
-      expect(searchHybridForChat).toBeDefined();
-      expect(typeof searchHybridForChat).toBe('function');
-    });
-
-    it('should combine keyword and semantic scores using RRF', async () => {
-      const { searchHybridForChat } = await import('../src/tools/projects.js');
-      
-      const results = await searchHybridForChat({
-        query: 'Shadow Demons',  // Should match keyword in D50
-        chunks: testChunks,
-        vectors: testVectors,
-        topK: 5,
-      });
-      
-      expect(results.length).toBeGreaterThan(0);
-      expect(results.length).toBeLessThanOrEqual(5);
-      
-      // Results should be sorted by combined score
-      for (let i = 1; i < results.length; i++) {
-        expect(results[i - 1].score).toBeGreaterThanOrEqual(results[i].score);
-      }
-    });
-
-    it('should return results with chunk_id, text, score, and source_id', async () => {
-      const { searchHybridForChat } = await import('../src/tools/projects.js');
-      
-      const results = await searchHybridForChat({
-        query: 'dungeon room',
-        chunks: testChunks,
-        vectors: testVectors,
-        topK: 3,
-      });
-      
-      expect(results.length).toBeGreaterThan(0);
-      
-      const result = results[0];
-      expect(result).toHaveProperty('chunk_id');
-      expect(result).toHaveProperty('text');
-      expect(result).toHaveProperty('score');
-      expect(result).toHaveProperty('source_id');
-    });
-
-    it('should handle empty query gracefully', async () => {
-      const { searchHybridForChat } = await import('../src/tools/projects.js');
-      
-      const results = await searchHybridForChat({
-        query: '',
-        chunks: testChunks,
-        vectors: testVectors,
-        topK: 5,
-      });
-      
-      expect(results).toBeInstanceOf(Array);
-    });
-  });
-
-  // ============================================================================
-  // Template Generator Tests
-  // ============================================================================
-
-  describe('Template Generator Hybrid Search', () => {
-    it('should generate /chat endpoint with hybrid search', async () => {
-      // Import the template generator function
-      const { generateMcpServerSourceForTest } = await import('../src/tools/projects.js');
-      
-      const source = generateMcpServerSourceForTest('test-server', 'Test description', 8080, true);
-      
-      // The generated code should use hybrid search, not just keyword
-      expect(source).toContain('searchHybrid');
-      expect(source).not.toMatch(/searchKeyword\(question,\s*Math\.min\(top_k/);
-    });
-
-    it('should generate code that embeds user questions', async () => {
-      const { generateMcpServerSourceForTest } = await import('../src/tools/projects.js');
-      
-      const source = generateMcpServerSourceForTest('test-server', 'Test description', 8080, true);
-      
-      // The generated /chat endpoint should embed the question
-      expect(source).toContain('generateQueryEmbedding');
-      expect(source).toContain('query_vector');
-    });
-
-    it('should generate code with hybrid search mode in /chat', async () => {
-      const { generateMcpServerSourceForTest } = await import('../src/tools/projects.js');
-      
-      const source = generateMcpServerSourceForTest('test-server', 'Test description', 8080, true);
-      
-      // Should have mode: "hybrid" or equivalent logic
-      expect(source).toMatch(/mode.*hybrid|searchHybrid|hybrid.*search/i);
-    });
-  });
-
-  // ============================================================================
-  // Integration Tests - Full Chat Flow
-  // ============================================================================
-
-  describe('Chat Endpoint Integration', () => {
-    it('should use hybrid search in the chat endpoint flow', async () => {
-      // This tests the full flow: question -> embedding -> hybrid search -> context
-      const { chatWithHybridSearch } = await import('../src/tools/projects.js');
-      
-      // Set API key to enable hybrid mode (key validity doesn't matter for this test)
-      const originalKey = process.env.OPENAI_API_KEY;
-      process.env.OPENAI_API_KEY = 'test-key';
-      
-      try {
-        const result = await chatWithHybridSearch({
-          question: 'What creatures lurk in the Chamber of Binding?',
-          projectDir: testProjectDir,
-          topK: 5,
-        });
-        
-        // The context should include D50 room content
-        expect(result.context).toContain('D50');
-        expect(result.context).toContain('Shadow Demons');
-        expect(result.searchMode).toBe('hybrid');
-      } finally {
-        // Restore original key
-        if (originalKey) {
-          process.env.OPENAI_API_KEY = originalKey;
-        } else {
-          delete process.env.OPENAI_API_KEY;
-        }
-      }
-    });
-
-    it('should retrieve SRD content via chat hybrid search', async () => {
-      const { chatWithHybridSearch } = await import('../src/tools/projects.js');
-      
-      const result = await chatWithHybridSearch({
-        question: 'What is the AC of an Aboleth?',
-        projectDir: testProjectDir,
-        topK: 5,
-      });
-      
-      expect(result.context).toContain('Aboleth');
-      expect(result.context).toContain('17');  // AC value
-      expect(result.sources).toContainEqual(expect.objectContaining({
-        source_name: 'SRD 5.2'
-      }));
-    });
-
-    it('should fall back to keyword search when embedding fails', async () => {
-      const { chatWithHybridSearch } = await import('../src/tools/projects.js');
-      
-      // Remove API key to force fallback
-      const originalKey = process.env.OPENAI_API_KEY;
-      delete process.env.OPENAI_API_KEY;
-      
-      try {
-        const result = await chatWithHybridSearch({
-          question: 'Shadow Demons',  // Exact keyword match should still work
-          projectDir: testProjectDir,
-          topK: 5,
-        });
-        
-        expect(result.searchMode).toBe('keyword');  // Fell back to keyword
-        expect(result.context).toContain('Shadow Demons');
-      } finally {
-        if (originalKey) process.env.OPENAI_API_KEY = originalKey;
-      }
-    });
-  });
-
-  // ============================================================================
-  // Edge Cases
-  // ============================================================================
-
-  describe('Edge Cases', () => {
-    it('should handle queries with special D&D notation (D50, CR 4)', async () => {
-      const { searchHybridForChat } = await import('../src/tools/projects.js');
-      
-      const results = await searchHybridForChat({
-        query: 'What is in room D50?',
-        chunks: testChunks,
-        vectors: testVectors,
-        topK: 5,
-      });
-      
-      const d50Found = results.some(r => r.text.includes('D50'));
-      expect(d50Found).toBe(true);
-    });
-
-    it('should handle queries with game mechanics terms (DC, saving throw)', async () => {
-      const { searchHybridForChat } = await import('../src/tools/projects.js');
-      
-      const results = await searchHybridForChat({
-        query: 'What is the DC for the wisdom saving throw in the binding chamber?',
-        chunks: testChunks,
-        vectors: testVectors,
-        topK: 5,
-      });
-      
-      // Should find D50 which has DC 16 Wisdom save
-      const found = results.some(r => r.text.includes('DC 16') || r.text.includes('Wisdom save'));
-      expect(found).toBe(true);
-    });
-
-    it('should handle very long queries', async () => {
-      const { searchHybridForChat } = await import('../src/tools/projects.js');
-      
-      const longQuery = 'I am looking for a room in the dungeon that has some kind of creatures, ' +
-        'possibly demons or fiends, that attack from above, maybe from the ceiling or darkness, ' +
-        'and there might be some kind of trap or curse involved with restraints or bindings ' +
-        'that could paralyze or immobilize adventurers who are not careful.';
-      
-      const results = await searchHybridForChat({
-        query: longQuery,
-        chunks: testChunks,
-        vectors: testVectors,
-        topK: 5,
-      });
-      
-      // Should find D50 based on semantic similarity
-      expect(results.length).toBeGreaterThan(0);
-    });
-
-    it('should handle queries in different phrasings for same content', async () => {
-      const { searchHybridForChat } = await import('../src/tools/projects.js');
-      
-      const queries = [
-        'Shadow Demons in D50',
-        'Where are the shadow demons?',
-        'demons lurking near ceiling',
-        'fiends that attack from above',
-      ];
-      
-      for (const query of queries) {
-        const results = await searchHybridForChat({
-          query,
-          chunks: testChunks,
-          vectors: testVectors,
-          topK: 5,
-        });
-        
-        // All variations should find D50 content
-        const d50Found = results.some(r => r.text.includes('Shadow Demons'));
-        expect(d50Found).toBe(true);
-      }
-    });
-  });
-
-  // ============================================================================
-  // Performance Considerations
-  // ============================================================================
-
-  describe('Performance', () => {
-    it('should complete hybrid search within 100ms for small datasets', async () => {
-      const { searchHybridForChat } = await import('../src/tools/projects.js');
-      
-      const startTime = Date.now();
-      
-      await searchHybridForChat({
-        query: 'Chamber of Binding demons',
-        chunks: testChunks,
-        vectors: testVectors,
-        topK: 5,
-      });
-      
-      const duration = Date.now() - startTime;
-      expect(duration).toBeLessThan(100);
-    });
-
-    it('should use RRF constant k=60 for score fusion', async () => {
-      // RRF formula: score = sum(1 / (k + rank))
-      // k=60 is standard for balancing keyword and semantic
-      const { searchHybridForChat, RRF_CONSTANT } = await import('../src/tools/projects.js');
-      
-      expect(RRF_CONSTANT).toBe(60);
-    });
+    expect(shouldStartHttp({ include_http: true }, {})).toBe(false);
+    expect(shouldStartHttp({ include_http: true }, { INDEXFOUNDRY_HTTP: '1' })).toBe(true);
+    expect(shouldStartHttp({ include_http: true }, { INDEXFOUNDRY_HTTP: 'true' })).toBe(true);
+    expect(shouldStartHttp({ include_http: false }, { INDEXFOUNDRY_HTTP: '1' })).toBe(false);
   });
 });
