@@ -322,6 +322,33 @@ describe('Hybrid Search', () => {
       expect(boosted[1].score).toBeCloseTo(0.65, 5);
     });
 
+    it('treats regex metacharacters in quoted anchors as literals', () => {
+      const literalAnchor: Chunk = {
+        ...testChunks[0],
+        chunk_id: 'literal-anchor',
+        text: 'The sigil is A(B: and must be copied exactly.',
+      };
+
+      expect(() => applyAnchorBoost(
+        [{ chunk: literalAnchor, score: 0.5 }],
+        detectAnchorTerms('find "A(B"')
+      )).not.toThrow();
+      expect(applyAnchorBoost(
+        [{ chunk: literalAnchor, score: 0.5 }],
+        ['A(B']
+      )[0].score).toBeCloseTo(0.9, 5);
+
+      const plusAnchor: Chunk = {
+        ...literalAnchor,
+        chunk_id: 'plus-anchor',
+        text: 'The sigil is A+B: and must be copied exactly.',
+      };
+      expect(applyAnchorBoost(
+        [{ chunk: plusAnchor, score: 0.5 }],
+        ['A+B']
+      )[0].score).toBeCloseTo(0.9, 5);
+    });
+
     it('leaves results untouched when there are no anchors', () => {
       const input = [{ chunk: testChunks[0], score: 0.5 }];
       expect(applyAnchorBoost(input, [])).toBe(input);
@@ -682,6 +709,15 @@ describe('Exported server template', () => {
   it('warns when the index model and query model disagree', async () => {
     const { generateMcpServerSourceForTest } = await import('../src/tools/projects.js');
     expect(generateMcpServerSourceForTest()).toContain('WARNING: index was built with');
+  });
+
+  it('keeps bearer authentication independent from caller-controlled Origin', async () => {
+    const { generateMcpServerSourceForTest } = await import('../src/tools/projects.js');
+    const source = generateMcpServerSourceForTest();
+
+    expect(source).toContain('Bearer token required');
+    expect(source).not.toContain('if (origin === requestOrigin) return true;');
+    expect(source).toContain('app.set("trust proxy", 1)');
   });
 
   it('emits a runtime config carrying the export-time options', async () => {

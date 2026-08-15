@@ -238,6 +238,13 @@ export function chunkContent(
   const seenHashes = existingHashes || new Set<string>();
   let index = startIndex;
   let duplicatesSkipped = 0;
+  const maxChars = Number.isFinite(config.max_chars)
+    ? Math.max(1, Math.floor(config.max_chars))
+    : 1;
+  const overlapChars = Number.isFinite(config.overlap_chars)
+    ? Math.max(0, Math.min(Math.floor(config.overlap_chars), maxChars - 1))
+    : 0;
+  const stride = maxChars - overlapChars;
   
   for (const content of contents) {
     // Simple recursive chunking
@@ -246,7 +253,7 @@ export function chunkContent(
     
     let pos = 0;
     while (pos < text.length) {
-      const end = Math.min(pos + config.max_chars, text.length);
+      const end = Math.min(pos + maxChars, text.length);
       const chunkText = text.slice(pos, end);
       
       // Generate content hash for deduplication
@@ -255,9 +262,8 @@ export function chunkContent(
       // Skip duplicate content
       if (seenHashes.has(contentHash)) {
         duplicatesSkipped++;
-        pos = end - config.overlap_chars;
-        if (pos <= 0) pos = end;
         if (end >= text.length) break;
+        pos += stride;
         continue;
       }
       
@@ -283,9 +289,8 @@ export function chunkContent(
       // If we've reached the end, break
       if (end >= text.length) break;
       
-      // Advance with overlap, but ensure we always move forward
-      pos = end - config.overlap_chars;
-      if (pos <= 0) pos = end; // Prevent infinite loop on small chunks
+      // Advance with overlap; `stride` is always at least one.
+      pos += stride;
     }
   }
   
@@ -305,7 +310,7 @@ export async function embedText(text: string, model: EmbeddingModel): Promise<nu
   if (model.provider === "openai") {
     console.error(`Embedding text (${text.length} chars) with ${model.model_name}`);
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout
+    const timeoutId = setTimeout(() => controller.abort(), EMBEDDING_TIMEOUT_MS);
 
     try {
       const response = await fetch("https://api.openai.com/v1/embeddings", {
@@ -360,6 +365,9 @@ export async function embedChunks(chunks: ChunkRecord[], model: EmbeddingModel):
   const totalBatches = Math.ceil(chunks.length / batchSize);
   logMetric("embed", `Starting embedding`, { chunks: chunks.length, batches: totalBatches, model: model.model_name });
 
+  const maxRateLimitRetries = 3;
+  const rateLimitRetries = new Map<number, number>();
+
   for (let i = 0; i < chunks.length; i += batchSize) {
     const batch = chunks.slice(i, i + batchSize);
     const texts = batch.map(c => c.text);
@@ -389,9 +397,18 @@ export async function embedChunks(chunks: ChunkRecord[], model: EmbeddingModel):
           const errorText = await response.text();
           // Check for rate limiting
           if (response.status === 429) {
-            logMetric("embed", `Rate limited, waiting 60s`, { batch: batchNum });
+            const attempts = (rateLimitRetries.get(i) ?? 0) + 1;
+            if (attempts > maxRateLimitRetries) {
+              throw new Error(
+                `OpenAI API rate limit persisted after ${maxRateLimitRetries} retries for batch ${batchNum}: ${errorText}`
+              );
+            }
+            rateLimitRetries.set(i, attempts);
+            logMetric("embed", `Rate limited, waiting 60s`, {
+              batch: batchNum,
+              attempt: attempts,
+            });
             await new Promise(resolve => setTimeout(resolve, 60000));
-            // Retry once
             i -= batchSize;
             continue;
           }

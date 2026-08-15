@@ -23,24 +23,29 @@ export interface RunOptions {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   timeoutMs?: number;
+  maxBufferBytes?: number;
 }
 
+const DEFAULT_COMMAND_TIMEOUT_MS = 5 * 60 * 1000;
+const DEFAULT_COMMAND_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
+
 /**
- * On Windows, `npm`/`npx`/`railway` are `.cmd` shims. `execFile` and `spawn`
- * do not resolve those without a shell, so the extension is added explicitly.
- * This is what lets us drop `shell: true` everywhere.
+ * Resolve commands without passing them through a shell. Windows `.cmd` shims
+ * are handled by `resolveInvocation`; arbitrary command names are left for
+ * Windows PATH resolution rather than guessing a shell-backed extension.
  */
 export function resolveCommand(command: string): string {
   if (process.platform !== "win32") return command;
   if (command === "node") return process.execPath;
-  if (/\.(cmd|bat|exe)$/i.test(command)) return command;
-  return `${command}.cmd`;
+  return command;
 }
 
 /**
  * Windows batch shims cannot be launched by child_process without a shell.
  * Resolve the Node-backed shims to their JavaScript entry points instead, so
- * callers keep argv semantics and do not need shell interpolation.
+ * callers keep argv semantics and do not need shell interpolation. If the
+ * local Node installation does not contain a known CLI entry point, fail
+ * clearly instead of falling back to a `.cmd` process with shell semantics.
  */
 function resolveInvocation(command: string, args: string[]): { file: string; args: string[] } {
   if (process.platform !== "win32") {
@@ -52,10 +57,32 @@ function resolveInvocation(command: string, args: string[]): { file: string; arg
     npx: path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npx-cli.js"),
     railway: path.join(path.dirname(process.execPath), "node_modules", "@railway", "cli", "bin", "railway.js"),
   };
-  const nodeCli = nodeCliByCommand[command];
+  const nodeCliCandidates = [nodeCliByCommand[command]];
+  if (command === "railway") {
+    const globalPrefixes = [
+      process.env.npm_config_prefix,
+      process.env.NPM_CONFIG_PREFIX,
+      process.env.APPDATA ? path.join(process.env.APPDATA, "npm") : undefined,
+      ...(process.env.Path ?? process.env.PATH ?? "").split(path.delimiter),
+    ].filter((prefix): prefix is string => Boolean(prefix));
+
+    nodeCliCandidates.push(
+      ...globalPrefixes.map(prefix =>
+        path.join(prefix, "node_modules", "@railway", "cli", "bin", "railway.js")
+      )
+    );
+  }
+
+  const nodeCli = nodeCliCandidates.find(candidate => Boolean(candidate) && existsSync(candidate));
 
   if (nodeCli && existsSync(nodeCli)) {
     return { file: process.execPath, args: [nodeCli, ...args] };
+  }
+
+  if (/\.(cmd|bat)$/i.test(command) || ["npm", "npx", "railway"].includes(command)) {
+    throw new Error(
+      `Cannot execute Windows command shim '${command}' without a Node CLI entry point`
+    );
   }
 
   return { file: resolveCommand(command), args };
@@ -73,7 +100,8 @@ export async function runCommand(
   const { stdout, stderr } = await execFileAsync(invocation.file, invocation.args, {
     cwd: options.cwd,
     env: options.env,
-    timeout: options.timeoutMs,
+    timeout: options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
+    maxBuffer: options.maxBufferBytes ?? DEFAULT_COMMAND_MAX_BUFFER_BYTES,
     windowsHide: true,
   });
   return { stdout: String(stdout), stderr: String(stderr) };

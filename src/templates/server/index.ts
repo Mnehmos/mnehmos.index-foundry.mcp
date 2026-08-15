@@ -24,7 +24,7 @@ import {
 import { readFileSync, existsSync } from "fs";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
-import { randomUUID } from "crypto";
+import { randomUUID, timingSafeEqual } from "crypto";
 import express from "express";
 
 import {
@@ -117,6 +117,76 @@ const DEFAULT_EMBEDDING_MODEL: EmbeddingModel = {
   model_name: "text-embedding-3-small",
   api_key_env: "OPENAI_API_KEY",
 };
+
+const CHAT_RATE_LIMIT_WINDOW_MS = 60_000;
+const DEFAULT_CHAT_RATE_LIMIT = 30;
+const chatRateLimit = new Map<string, { count: number; resetAt: number }>();
+let missingTokenWarningLogged = false;
+
+function configuredCorsOrigins(): Set<string> {
+  return new Set(
+    (process.env.CORS_ORIGINS || "")
+      .split(",")
+      .map(origin => origin.trim())
+      .filter(origin => origin.length > 0 && origin !== "*")
+  );
+}
+
+function tokenMatches(expected: string, received: string): boolean {
+  const expectedBytes = Buffer.from(expected);
+  const receivedBytes = Buffer.from(received);
+  return expectedBytes.length === receivedBytes.length && timingSafeEqual(expectedBytes, receivedBytes);
+}
+
+function requireApiToken(req: express.Request, res: express.Response): boolean {
+  const expectedToken = process.env.RAG_API_TOKEN?.trim();
+  if (!expectedToken) {
+    if (process.env.NODE_ENV === "production") {
+      res.status(503).json({ error: "RAG_API_TOKEN is not configured" });
+      return false;
+    }
+    if (!missingTokenWarningLogged) {
+      console.error("[WARN] RAG_API_TOKEN is not configured; chat auth is disabled outside production");
+      missingTokenWarningLogged = true;
+    }
+    return true;
+  }
+
+  const authorization = req.header("authorization") || "";
+  const match = /^Bearer\s+(.+)$/i.exec(authorization);
+  if (!match || !tokenMatches(expectedToken, match[1])) {
+    res.status(401).json({ error: "Bearer token required" });
+    return false;
+  }
+  return true;
+}
+
+function rateLimitChatRequest(req: express.Request, res: express.Response): boolean {
+  const configuredLimit = Number.parseInt(process.env.CHAT_RATE_LIMIT_PER_MINUTE || "", 10);
+  const limit = Number.isFinite(configuredLimit) && configuredLimit > 0
+    ? configuredLimit
+    : DEFAULT_CHAT_RATE_LIMIT;
+  const now = Date.now();
+  const key = req.ip || req.socket.remoteAddress || "unknown";
+  for (const [entryKey, entry] of chatRateLimit) {
+    if (entry.resetAt <= now) chatRateLimit.delete(entryKey);
+  }
+  const current = chatRateLimit.get(key);
+
+  if (!current || current.resetAt <= now) {
+    chatRateLimit.set(key, { count: 1, resetAt: now + CHAT_RATE_LIMIT_WINDOW_MS });
+    return true;
+  }
+
+  if (current.count >= limit) {
+    res.setHeader("Retry-After", Math.ceil((current.resetAt - now) / 1000));
+    res.status(429).json({ error: "Chat rate limit exceeded" });
+    return false;
+  }
+
+  current.count++;
+  return true;
+}
 
 function readJsonFile<T>(filePath: string): T | null {
   if (!existsSync(filePath)) return null;
@@ -499,9 +569,18 @@ function registerRequestMiddleware(app: express.Express): void {
     next();
   });
 
-  // CORS middleware
+  // CORS middleware. Same-origin requests work by default; cross-origin
+  // callers must be listed in CORS_ORIGINS (comma-separated exact origins).
   app.use((req, res, next) => {
-    res.header("Access-Control-Allow-Origin", "*");
+    const origin = req.header("origin");
+    const requestOrigin = `${req.protocol}://${req.get("host")}`;
+    if (origin && origin !== requestOrigin && !configuredCorsOrigins().has(origin)) {
+      return res.status(403).json({ error: "Origin is not allowed" });
+    }
+    if (origin) {
+      res.header("Access-Control-Allow-Origin", origin);
+      res.header("Vary", "Origin");
+    }
     res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
     res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
     if (req.method === "OPTIONS") {
@@ -718,6 +797,8 @@ async function streamChatCompletion(
 
 function registerChatRoute(app: express.Express): void {
   app.post("/chat", async (req, res) => {
+    if (!requireApiToken(req, res) || !rateLimitChatRequest(req, res)) return;
+
     const {
       question,
       system_prompt,
@@ -731,9 +812,13 @@ function registerChatRoute(app: express.Express): void {
       return res.status(400).json({ error: "question is required" });
     }
 
-    const apiKey = process.env[embeddingModel.api_key_env] || process.env.OPENAI_API_KEY;
-    if (!apiKey) {
+    const embeddingApiKey = process.env[embeddingModel.api_key_env];
+    const chatApiKey = process.env.OPENAI_API_KEY;
+    if (!embeddingApiKey) {
       return res.status(500).json({ error: `${embeddingModel.api_key_env} not configured` });
+    }
+    if (!chatApiKey) {
+      return res.status(500).json({ error: "OPENAI_API_KEY not configured" });
     }
 
     const activeConversationId = conversation_id || randomUUID();
@@ -766,7 +851,7 @@ function registerChatRoute(app: express.Express): void {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
+          Authorization: `Bearer ${chatApiKey}`,
         },
         body: JSON.stringify({
           model: model || process.env.OPENAI_MODEL || "gpt-5-nano-2025-08-07",
@@ -828,6 +913,10 @@ function registerErrorHandler(app: express.Express): void {
 function startHttpServer(): void {
 
   const app = express();
+  // Railway terminates TLS and forwards one proxy hop. Trusting that hop keeps
+  // req.protocol and req.ip aligned with the browser origin and client that
+  // reached the public service.
+  app.set("trust proxy", 1);
   app.use(express.json({ limit: "1mb" }));
   registerRequestMiddleware(app);
   registerFrontendRoute(app);

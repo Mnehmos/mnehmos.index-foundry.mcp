@@ -105,18 +105,27 @@ export function logMetric(
 // Project Manager
 // ============================================================================
 
-let projectsBaseDir: string;
+let projectsBaseDir: string | undefined;
+
+function requireProjectsBaseDir(): string {
+  if (!projectsBaseDir) {
+    throw new Error(
+      "Project manager is not initialized. Call initProjectManager(baseDir) before using project paths."
+    );
+  }
+  return projectsBaseDir;
+}
 
 export function initProjectManager(baseDir: string): void {
   projectsBaseDir = path.join(baseDir, "projects");
 }
 
 export function getProjectsBaseDir(): string {
-  return projectsBaseDir;
+  return requireProjectsBaseDir();
 }
 
 export function getProjectDir(projectId: string): string {
-  return path.join(projectsBaseDir, projectId);
+  return path.join(requireProjectsBaseDir(), projectId);
 }
 
 export interface ProjectPaths {

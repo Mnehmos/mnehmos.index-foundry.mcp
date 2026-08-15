@@ -125,6 +125,10 @@ export function detectAnchorTerms(query: string): string[] {
   return [...new Set(anchors)]; // Dedupe
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 /**
  * Calculate query specificity (0 = very broad, 1 = very specific).
  * Used for adaptive weighting between keyword and semantic search.
@@ -159,7 +163,7 @@ function anchorBoostFor(text: string, anchorTerms: string[]): number {
   for (const anchor of anchorTerms) {
     if (lowered.includes(anchor.toLowerCase())) {
       // Higher boost for an exact pattern match (e.g. "D40." or "D40:")
-      const exactMatch = new RegExp(`\\b${anchor}\\s*[\\.:\\)]`, "i");
+      const exactMatch = new RegExp(`\\b${escapeRegExp(anchor)}\\s*[\\.:\\)]`, "i");
       boost += exactMatch.test(text) ? 0.4 : 0.15;
     }
   }

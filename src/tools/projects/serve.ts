@@ -107,6 +107,7 @@ async function readServerPidFile(projectId: string): Promise<{ pid: number; port
   try {
     if (!(await pathExists(pidFilePath))) return null;
     const content = await readJson<{ pid: number; port: number; mode: string; startTime: string }>(pidFilePath);
+    if (!content || !Number.isInteger(content.pid) || !Number.isInteger(content.port)) return null;
     return content;
   } catch {
     return null;
@@ -151,6 +152,19 @@ async function waitForHealthCheck(endpoint: string, timeoutMs: number): Promise<
   return false;
 }
 
+/** A single identity check used before acting on a persisted PID. */
+async function isHealthyEndpoint(endpoint: string): Promise<boolean> {
+  try {
+    const response = await fetch(`${endpoint}/health`, {
+      method: "GET",
+      signal: AbortSignal.timeout(1500),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Start a local development server for a project
  */
@@ -175,11 +189,15 @@ async function validateServeRequest(
 
   const pidData = await readServerPidFile(input.project_id);
   if (pidData && isProcessRunning(pidData.pid)) {
-    return createToolError(
-      "ALREADY_RUNNING",
-      `Server already running for '${input.project_id}' (PID: ${pidData.pid}, started externally). Use project_serve_stop first.`,
-      { recoverable: true }
-    );
+    const endpoint = `http://localhost:${pidData.port}`;
+    if (await isHealthyEndpoint(endpoint)) {
+      return createToolError(
+        "ALREADY_RUNNING",
+        `Server already running for '${input.project_id}' (PID: ${pidData.pid}, started externally). Use project_serve_stop first.`,
+        { recoverable: true }
+      );
+    }
+    await deleteServerPidFile(input.project_id);
   }
 
   if (!(await pathExists(path.join(paths.src, "index.ts")))) {
@@ -204,6 +222,7 @@ async function validateServeRequest(
 interface StartedServer {
   process: ChildProcess;
   stderr: { value: string };
+  spawnError: { value: Error | null };
 }
 
 async function startServerProcess(
@@ -234,6 +253,7 @@ async function startServerProcess(
         stdio: ["ignore", "pipe", "pipe"],
       }),
       stderr: { value: "" },
+      spawnError: { value: null },
     };
   }
 
@@ -256,6 +276,7 @@ async function startServerProcess(
       stdio: ["ignore", "pipe", "pipe"],
     }),
     stderr: { value: "" },
+    spawnError: { value: null },
   };
 }
 
@@ -267,6 +288,12 @@ function attachServerLogging(projectId: string, started: StartedServer): void {
   });
   serverProcess.stdout?.on("data", data => {
     console.error(`[${projectId}] ${data.toString().trim()}`);
+  });
+  serverProcess.on("error", error => {
+    started.spawnError.value = error instanceof Error ? error : new Error(String(error));
+    console.error(`[${projectId}] Failed to launch server process: ${started.spawnError.value.message}`);
+    runningServers.delete(projectId);
+    deleteServerPidFile(projectId).catch(() => {});
   });
   serverProcess.on("exit", code => {
     console.error(`[${projectId}] Server exited with code ${code}`);
@@ -280,13 +307,19 @@ function storeRunningServer(
   input: ProjectServeInput,
   started: StartedServer,
   endpoint: string
-): RunningServer {
+): RunningServer | ToolError {
   const serverProcess = started.process;
+  const pid = serverProcess.pid;
+  if (pid === undefined) {
+    return createToolError("SERVE_FAILED", `Failed to spawn server process for '${input.project_id}'`, {
+      recoverable: true,
+    });
+  }
   const startTime = new Date();
   const serverInfo: RunningServer = {
     projectId: input.project_id,
     process: serverProcess,
-    pid: serverProcess.pid!,
+    pid,
     port: input.port,
     mode: input.mode,
     startTime,
@@ -306,7 +339,9 @@ async function openProjectFrontend(
   if (!(await pathExists(frontendPath))) return;
 
   try {
-    await openInBrowser(frontendPath);
+    // Serve the frontend through Express so browser requests have a supported
+    // origin instead of the `file://` / `Origin: null` origin.
+    await openInBrowser(`http://localhost:${input.port}/`);
     console.error("[browser] Opened frontend in browser");
   } catch {
     console.error("Could not open browser automatically");
@@ -325,6 +360,7 @@ export async function projectServe(input: ProjectServeInput): Promise<ProjectSer
     const endpoint = `http://localhost:${input.port}`;
     attachServerLogging(input.project_id, started);
     const serverInfo = storeRunningServer(input, started, endpoint);
+    if ("isError" in serverInfo) return serverInfo;
 
     await writeServerPidFile(input.project_id, {
       pid: serverInfo.pid,
@@ -335,6 +371,13 @@ export async function projectServe(input: ProjectServeInput): Promise<ProjectSer
 
     console.error("[wait] Waiting for server health check...");
     const healthy = await waitForHealthCheck(endpoint, input.health_check_timeout);
+    if (started.spawnError.value) {
+      return createToolError(
+        "SERVE_FAILED",
+        `Failed to launch server process: ${started.spawnError.value.message}`,
+        { recoverable: true }
+      );
+    }
     if (!healthy) {
       console.error(
         `Warning: Health check timed out. Server may still be starting. stderr: ${started.stderr.value.slice(-500)}`
@@ -384,18 +427,21 @@ export async function projectServeStop(input: ProjectServeStopInput): Promise<Pr
 
   // Try to find running server
   let pid: number | undefined;
+  let endpoint: string | undefined;
   let startTime: Date | undefined;
 
   // First check in-memory map
   const runningServer = runningServers.get(input.project_id);
   if (runningServer) {
     pid = runningServer.pid;
+    endpoint = runningServer.endpoint;
     startTime = runningServer.startTime;
   } else {
     // Check PID file for externally started server
     const pidData = await readServerPidFile(input.project_id);
     if (pidData) {
       pid = pidData.pid;
+      endpoint = `http://localhost:${pidData.port}`;
       startTime = new Date(pidData.startTime);
     }
   }
@@ -406,8 +452,17 @@ export async function projectServeStop(input: ProjectServeStopInput): Promise<Pr
     });
   }
 
-  // Check if process is actually running
-  if (!isProcessRunning(pid)) {
+  // A persisted PID can be reused after a crash or reboot, so require its
+  // recorded port to answer the health endpoint before sending a signal. An
+  // in-memory child was spawned by this MCP instance, so it can be stopped
+  // even when its health endpoint is currently unhealthy.
+  const processRunning = isProcessRunning(pid);
+  const identityConfirmed = runningServer
+    ? processRunning
+    : processRunning && endpoint !== undefined
+      ? await isHealthyEndpoint(endpoint)
+      : false;
+  if (!identityConfirmed) {
     // Clean up stale references
     runningServers.delete(input.project_id);
     await deleteServerPidFile(input.project_id);
@@ -434,8 +489,20 @@ export async function projectServeStop(input: ProjectServeStopInput): Promise<Pr
       // Wait a bit for graceful shutdown
       await new Promise(resolve => setTimeout(resolve, 2000));
 
-      // Check if still running
-      if (isProcessRunning(pid)) {
+      // Revalidate the original process before escalating. An in-memory
+      // ChildProcess object is a non-reusable identity; for a persisted PID,
+      // require the recorded endpoint to remain healthy so a reused PID is
+      // never force-killed.
+      const originalProcessStillRunning = runningServer
+        ? runningServers.get(input.project_id)?.process === runningServer.process
+          && runningServer.process.pid === pid
+          && runningServer.process.exitCode === null
+          && runningServer.process.signalCode === null
+          && isProcessRunning(pid)
+        : isProcessRunning(pid)
+          && endpoint !== undefined
+          && await isHealthyEndpoint(endpoint);
+      if (originalProcessStillRunning) {
         console.error(`Ã¢Å¡ Ã¯Â¸Â Process still running, sending SIGKILL...`);
         process.kill(pid, "SIGKILL");
       }

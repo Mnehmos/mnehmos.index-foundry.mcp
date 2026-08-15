@@ -408,6 +408,15 @@ export async function generateDeploymentFiles(
   const serverName = options?.serverName || projectId;
   const serverDesc = options?.serverDescription || manifest.description || `RAG server for ${manifest.name}`;
   const port = options?.port || 8080;
+  const apiKeyEnv = manifest.embedding_model?.api_key_env || "OPENAI_API_KEY";
+  const embeddingKeyDocumentation = apiKeyEnv === "OPENAI_API_KEY"
+    ? "| `OPENAI_API_KEY` | For /chat and semantic search | OpenAI API key used by embeddings and chat |"
+    : `| \`${apiKeyEnv}\` | For semantic search | API key used by the configured embedding provider |
+| \`OPENAI_API_KEY\` | For /chat | OpenAI API key used by chat |`;
+  const embeddingKeyDeploymentRows = apiKeyEnv === "OPENAI_API_KEY"
+    ? "| `OPENAI_API_KEY` | `sk-proj-...` | Yes |"
+    : `| \`${apiKeyEnv}\` | Embedding provider key | Yes |
+| \`OPENAI_API_KEY\` | OpenAI chat key | Yes |`;
 
   // .gitignore
   await writeFile(path.join(paths.root, ".gitignore"), `
@@ -441,16 +450,23 @@ frontend/local.config.js
     dependencies: {
       "@modelcontextprotocol/sdk": "^1.0.0",
       dotenv: "^16.3.1",
-      express: "^4.18.2",
+      express: "^5.2.1",
     },
     devDependencies: {
-      "@types/express": "^4.17.21",
+      "@types/express": "^5.0.6",
       "@types/node": "^20.10.0",
       typescript: "^5.3.0",
       tsx: "^4.7.0"
     }
   }, null, 2));
   files.push("package.json");
+
+  // Rebuild the lockfile from the generated package.json so re-exporting an
+  // existing project cannot leave Docker's npm ci with stale dependency pins.
+  await runCommand("npm", ["install", "--package-lock-only", "--ignore-scripts"], {
+    cwd: paths.root,
+  });
+  files.push("package-lock.json");
 
   // tsconfig.json
   await writeFile(path.join(paths.root, "tsconfig.json"), JSON.stringify({
@@ -563,15 +579,26 @@ On PowerShell, use $env:INDEXFOUNDRY_HTTP="1"; npm start.
 |----------|----------|-------------|
 | \`PORT\` | No | HTTP server port (default: ${port}) |
 | \`INDEXFOUNDRY_HTTP\` | No | Set to \`1\` to enable the HTTP API; omitted for stdio-only MCP mode |
-| \`OPENAI_API_KEY\` | For /chat | OpenAI API key for chat endpoint |
+${embeddingKeyDocumentation}
+| \`RAG_API_TOKEN\` | API/cross-origin /chat | Bearer token for API clients and separately hosted frontends; the bundled same-origin frontend uses the browser-origin policy |
+| \`CORS_ORIGINS\` | No | Comma-separated exact origins allowed for cross-origin requests |
+| \`CHAT_RATE_LIMIT_PER_MINUTE\` | No | Per-client \`/chat\` limit; defaults to 30 |
 | \`OPENAI_MODEL\` | No | Model for chat (default: gpt-5-nano-2025-08-07) |
+
+The bundled frontend is served from the RAG server's own origin and never
+embeds \`RAG_API_TOKEN\`. In production, it prompts the user for the bearer
+token and retains it only in that browser session. Bearer authentication is
+also required for API clients and separately hosted frontends; add their exact
+origin to \`CORS_ORIGINS\`. If the RAG data is private, put an authenticated
+application or proxy in front of the bundled UI.
 
 ## Deploy to Railway
 
 1. Push to GitHub
 2. Connect repo to Railway
-3. Add \`OPENAI_API_KEY\` environment variable (for /chat)
-4. Deploy
+3. Add \`OPENAI_API_KEY\` and a strong \`RAG_API_TOKEN\` environment variable
+4. Add the frontend origin to \`CORS_ORIGINS\` only when the frontend is hosted separately
+5. Deploy
 
 ## HTTP Endpoints
 
@@ -591,6 +618,7 @@ curl -X POST https://your-app.railway.app/search \\
 \`\`\`bash
 curl -X POST https://your-app.railway.app/chat \\
   -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer $RAG_API_TOKEN" \\
   -d '{"question": "What is...?"}'
 \`\`\`
 
@@ -653,7 +681,7 @@ HTTP server listening on port ${port}
 
 ### Step 4: Test the Frontend
 1. Copy \`frontend/local.config.js.example\` to \`frontend/local.config.js\`
-2. Open \`frontend/index.html\` in your browser
+2. Open \`http://localhost:${port}/\` in your browser (or run the project with \`open_browser\` enabled)
 3. The status should show "Ready" (green indicator)
 4. Ask a question to verify the chat works!
 
@@ -711,9 +739,11 @@ In Railway dashboard -> your service -> **"Variables"** tab:
 
 | Variable | Value | Required |
 |----------|-------|----------|
-| \`OPENAI_API_KEY\` | \`sk-proj-...\` | Ã¢Å“â€¦ Yes |
-| \`PORT\` | \`${port}\` | Ã¢ÂÅ’ Auto-set |
-| \`OPENAI_MODEL\` | \`gpt-5-nano-2025-08-07\` | Ã¢ÂÅ’ Optional |
+${embeddingKeyDeploymentRows}
+| \`RAG_API_TOKEN\` | Long random bearer token | Yes for API/cross-origin chat |
+| \`CORS_ORIGINS\` | Frontend origin(s), if separate | Optional |
+| \`PORT\` | \`${port}\` | Auto-set |
+| \`OPENAI_MODEL\` | \`gpt-5-nano-2025-08-07\` | Optional |
 
 > Ã¢Å¡ Ã¯Â¸Â **Never commit API keys to Git!**
 
@@ -745,6 +775,7 @@ curl -X POST https://YOUR-APP.railway.app/search \\
 \`\`\`bash
 curl -X POST https://YOUR-APP.railway.app/chat \\
   -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer $RAG_API_TOKEN" \\
   -d '{"question": "What is this about?"}'
 \`\`\`
 
@@ -831,28 +862,39 @@ Upload the contents of \`frontend/\` to:
 
   // The server embeds queries with the model recorded in project.json, so the
   // env var it needs is whatever that project was built with.
-  const apiKeyEnv = manifest.embedding_model?.api_key_env || "OPENAI_API_KEY";
+  const chatApiKeyExample = apiKeyEnv === "OPENAI_API_KEY"
+    ? ""
+    : "OPENAI_API_KEY=sk-your-chat-key-here\n";
+  const chatApiKeyEmpty = apiKeyEnv === "OPENAI_API_KEY"
+    ? ""
+    : "OPENAI_API_KEY=\n";
 
   // .env.example - documents required environment variables
   await writeFile(path.join(paths.root, ".env.example"), `# Required for semantic search and the /chat endpoint
 ${apiKeyEnv}=sk-your-key-here
+${chatApiKeyExample}RAG_API_TOKEN=replace-with-a-long-random-token
 
 # Optional configuration
 PORT=${port}
 # Set INDEXFOUNDRY_HTTP=1 to enable the HTTP API (stdio-only MCP is the default)
 OPENAI_MODEL=gpt-5-nano-2025-08-07
 NODE_ENV=production
+CORS_ORIGINS=
+CHAT_RATE_LIMIT_PER_MINUTE=30
 `);
   files.push(".env.example");
 
   // .env file for users to fill in (gitignored)
   await writeFile(path.join(paths.root, ".env"), `# Fill in your API keys below
 ${apiKeyEnv}=
+${chatApiKeyEmpty}RAG_API_TOKEN=
 
 # Optional configuration
 PORT=${port}
 OPENAI_MODEL=gpt-5-nano-2025-08-07
 NODE_ENV=development
+CORS_ORIGINS=
+CHAT_RATE_LIMIT_PER_MINUTE=30
 `);
   files.push(".env");
 
@@ -907,23 +949,16 @@ runs/
 
     // local.config.js.example for development
     await writeFile(path.join(frontendDir, 'local.config.js.example'), `// Local development configuration
-// Copy this file to local.config.js and edit the RAG_SERVER URL
+// Copy this file to local.config.js and edit the server URL and token as needed
 
 window.LOCAL_CONFIG = {
-  RAG_SERVER: 'http://localhost:${port}'
+  RAG_SERVER: 'http://localhost:${port}',
+  // Required when the frontend calls a different origin in production.
+  RAG_API_TOKEN: ''
 };
 `);
     files.push('frontend/local.config.js.example');
 
-    // Also create local.config.js for immediate local development use
-    await writeFile(path.join(frontendDir, 'local.config.js'), `// Local development configuration (auto-generated)
-// Edit RAG_SERVER URL if running on a different port
-
-window.LOCAL_CONFIG = {
-  RAG_SERVER: 'http://localhost:${port}'
-};
-`);
-    files.push('frontend/local.config.js');
   }
 
   return files;
