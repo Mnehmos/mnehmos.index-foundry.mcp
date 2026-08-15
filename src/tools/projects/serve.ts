@@ -489,8 +489,20 @@ export async function projectServeStop(input: ProjectServeStopInput): Promise<Pr
       // Wait a bit for graceful shutdown
       await new Promise(resolve => setTimeout(resolve, 2000));
 
-      // Check if still running
-      if (isProcessRunning(pid)) {
+      // Revalidate the original process before escalating. An in-memory
+      // ChildProcess object is a non-reusable identity; for a persisted PID,
+      // require the recorded endpoint to remain healthy so a reused PID is
+      // never force-killed.
+      const originalProcessStillRunning = runningServer
+        ? runningServers.get(input.project_id)?.process === runningServer.process
+          && runningServer.process.pid === pid
+          && runningServer.process.exitCode === null
+          && runningServer.process.signalCode === null
+          && isProcessRunning(pid)
+        : isProcessRunning(pid)
+          && endpoint !== undefined
+          && await isHealthyEndpoint(endpoint);
+      if (originalProcessStillRunning) {
         console.error(`Ã¢Å¡ Ã¯Â¸Â Process still running, sending SIGKILL...`);
         process.kill(pid, "SIGKILL");
       }

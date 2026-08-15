@@ -337,6 +337,16 @@ describe('Hybrid Search', () => {
         [{ chunk: literalAnchor, score: 0.5 }],
         ['A(B']
       )[0].score).toBeCloseTo(0.9, 5);
+
+      const plusAnchor: Chunk = {
+        ...literalAnchor,
+        chunk_id: 'plus-anchor',
+        text: 'The sigil is A+B: and must be copied exactly.',
+      };
+      expect(applyAnchorBoost(
+        [{ chunk: plusAnchor, score: 0.5 }],
+        ['A+B']
+      )[0].score).toBeCloseTo(0.9, 5);
     });
 
     it('leaves results untouched when there are no anchors', () => {

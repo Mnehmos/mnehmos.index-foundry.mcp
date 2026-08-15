@@ -921,6 +921,10 @@ function registerErrorHandler(app: express.Express): void {
 function startHttpServer(): void {
 
   const app = express();
+  // Railway terminates TLS and forwards one proxy hop. Trusting that hop keeps
+  // req.protocol and req.ip aligned with the browser origin and client that
+  // reached the public service.
+  app.set("trust proxy", 1);
   app.use(express.json({ limit: "1mb" }));
   registerRequestMiddleware(app);
   registerFrontendRoute(app);

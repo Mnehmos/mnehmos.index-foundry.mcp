@@ -408,6 +408,15 @@ export async function generateDeploymentFiles(
   const serverName = options?.serverName || projectId;
   const serverDesc = options?.serverDescription || manifest.description || `RAG server for ${manifest.name}`;
   const port = options?.port || 8080;
+  const apiKeyEnv = manifest.embedding_model?.api_key_env || "OPENAI_API_KEY";
+  const embeddingKeyDocumentation = apiKeyEnv === "OPENAI_API_KEY"
+    ? "| `OPENAI_API_KEY` | For /chat and semantic search | OpenAI API key used by embeddings and chat |"
+    : `| \`${apiKeyEnv}\` | For semantic search | API key used by the configured embedding provider |
+| \`OPENAI_API_KEY\` | For /chat | OpenAI API key used by chat |`;
+  const embeddingKeyDeploymentRows = apiKeyEnv === "OPENAI_API_KEY"
+    ? "| `OPENAI_API_KEY` | `sk-proj-...` | Yes |"
+    : `| \`${apiKeyEnv}\` | Embedding provider key | Yes |
+| \`OPENAI_API_KEY\` | OpenAI chat key | Yes |`;
 
   // .gitignore
   await writeFile(path.join(paths.root, ".gitignore"), `
@@ -451,6 +460,13 @@ frontend/local.config.js
     }
   }, null, 2));
   files.push("package.json");
+
+  // Rebuild the lockfile from the generated package.json so re-exporting an
+  // existing project cannot leave Docker's npm ci with stale dependency pins.
+  await runCommand("npm", ["install", "--package-lock-only", "--ignore-scripts"], {
+    cwd: paths.root,
+  });
+  files.push("package-lock.json");
 
   // tsconfig.json
   await writeFile(path.join(paths.root, "tsconfig.json"), JSON.stringify({
@@ -563,11 +579,17 @@ On PowerShell, use $env:INDEXFOUNDRY_HTTP="1"; npm start.
 |----------|----------|-------------|
 | \`PORT\` | No | HTTP server port (default: ${port}) |
 | \`INDEXFOUNDRY_HTTP\` | No | Set to \`1\` to enable the HTTP API; omitted for stdio-only MCP mode |
-| \`OPENAI_API_KEY\` | For /chat | OpenAI API key used for embeddings and chat |
+${embeddingKeyDocumentation}
 | \`RAG_API_TOKEN\` | API/cross-origin /chat | Bearer token for API clients and separately hosted frontends; the bundled same-origin frontend uses the browser-origin policy |
 | \`CORS_ORIGINS\` | No | Comma-separated exact origins allowed for cross-origin requests |
 | \`CHAT_RATE_LIMIT_PER_MINUTE\` | No | Per-client \`/chat\` limit; defaults to 30 |
 | \`OPENAI_MODEL\` | No | Model for chat (default: gpt-5-nano-2025-08-07) |
+
+The bundled frontend is served from the RAG server's own origin, so its browser
+requests use the same-origin policy and do not embed \`RAG_API_TOKEN\`. Bearer
+authentication remains required for API clients and separately hosted
+frontends; add their exact origin to \`CORS_ORIGINS\`. If the RAG data is
+private, put an authenticated application or proxy in front of the bundled UI.
 
 ## Deploy to Railway
 
@@ -716,11 +738,11 @@ In Railway dashboard -> your service -> **"Variables"** tab:
 
 | Variable | Value | Required |
 |----------|-------|----------|
-| \`OPENAI_API_KEY\` | \`sk-proj-...\` | Ã¢Å“â€¦ Yes |
-| \`RAG_API_TOKEN\` | Long random bearer token | Ã¢Å“â€¦ Yes |
-| \`CORS_ORIGINS\` | Frontend origin(s), if separate | Ã¢ÂÅ’ Optional |
-| \`PORT\` | \`${port}\` | Ã¢ÂÅ’ Auto-set |
-| \`OPENAI_MODEL\` | \`gpt-5-nano-2025-08-07\` | Ã¢ÂÅ’ Optional |
+${embeddingKeyDeploymentRows}
+| \`RAG_API_TOKEN\` | Long random bearer token | Yes for API/cross-origin chat |
+| \`CORS_ORIGINS\` | Frontend origin(s), if separate | Optional |
+| \`PORT\` | \`${port}\` | Auto-set |
+| \`OPENAI_MODEL\` | \`gpt-5-nano-2025-08-07\` | Optional |
 
 > Ã¢Å¡ Ã¯Â¸Â **Never commit API keys to Git!**
 
@@ -839,12 +861,17 @@ Upload the contents of \`frontend/\` to:
 
   // The server embeds queries with the model recorded in project.json, so the
   // env var it needs is whatever that project was built with.
-  const apiKeyEnv = manifest.embedding_model?.api_key_env || "OPENAI_API_KEY";
+  const chatApiKeyExample = apiKeyEnv === "OPENAI_API_KEY"
+    ? ""
+    : "OPENAI_API_KEY=sk-your-chat-key-here\n";
+  const chatApiKeyEmpty = apiKeyEnv === "OPENAI_API_KEY"
+    ? ""
+    : "OPENAI_API_KEY=\n";
 
   // .env.example - documents required environment variables
   await writeFile(path.join(paths.root, ".env.example"), `# Required for semantic search and the /chat endpoint
 ${apiKeyEnv}=sk-your-key-here
-RAG_API_TOKEN=replace-with-a-long-random-token
+${chatApiKeyExample}RAG_API_TOKEN=replace-with-a-long-random-token
 
 # Optional configuration
 PORT=${port}
@@ -859,7 +886,7 @@ CHAT_RATE_LIMIT_PER_MINUTE=30
   // .env file for users to fill in (gitignored)
   await writeFile(path.join(paths.root, ".env"), `# Fill in your API keys below
 ${apiKeyEnv}=
-RAG_API_TOKEN=
+${chatApiKeyEmpty}RAG_API_TOKEN=
 
 # Optional configuration
 PORT=${port}
