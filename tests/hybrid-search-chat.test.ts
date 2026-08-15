@@ -322,6 +322,23 @@ describe('Hybrid Search', () => {
       expect(boosted[1].score).toBeCloseTo(0.65, 5);
     });
 
+    it('treats regex metacharacters in quoted anchors as literals', () => {
+      const literalAnchor: Chunk = {
+        ...testChunks[0],
+        chunk_id: 'literal-anchor',
+        text: 'The sigil is A(B: and must be copied exactly.',
+      };
+
+      expect(() => applyAnchorBoost(
+        [{ chunk: literalAnchor, score: 0.5 }],
+        detectAnchorTerms('find "A(B"')
+      )).not.toThrow();
+      expect(applyAnchorBoost(
+        [{ chunk: literalAnchor, score: 0.5 }],
+        ['A(B']
+      )[0].score).toBeCloseTo(0.9, 5);
+    });
+
     it('leaves results untouched when there are no anchors', () => {
       const input = [{ chunk: testChunks[0], score: 0.5 }];
       expect(applyAnchorBoost(input, [])).toBe(input);

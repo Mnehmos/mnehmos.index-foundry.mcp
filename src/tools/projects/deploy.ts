@@ -441,10 +441,10 @@ frontend/local.config.js
     dependencies: {
       "@modelcontextprotocol/sdk": "^1.0.0",
       dotenv: "^16.3.1",
-      express: "^4.18.2",
+      express: "^5.2.1",
     },
     devDependencies: {
-      "@types/express": "^4.17.21",
+      "@types/express": "^5.0.6",
       "@types/node": "^20.10.0",
       typescript: "^5.3.0",
       tsx: "^4.7.0"
@@ -563,15 +563,19 @@ On PowerShell, use $env:INDEXFOUNDRY_HTTP="1"; npm start.
 |----------|----------|-------------|
 | \`PORT\` | No | HTTP server port (default: ${port}) |
 | \`INDEXFOUNDRY_HTTP\` | No | Set to \`1\` to enable the HTTP API; omitted for stdio-only MCP mode |
-| \`OPENAI_API_KEY\` | For /chat | OpenAI API key for chat endpoint |
+| \`OPENAI_API_KEY\` | For /chat | OpenAI API key used for embeddings and chat |
+| \`RAG_API_TOKEN\` | Production | Bearer token required by \`/chat\` when \`NODE_ENV=production\` |
+| \`CORS_ORIGINS\` | No | Comma-separated exact origins allowed for cross-origin requests |
+| \`CHAT_RATE_LIMIT_PER_MINUTE\` | No | Per-client \`/chat\` limit; defaults to 30 |
 | \`OPENAI_MODEL\` | No | Model for chat (default: gpt-5-nano-2025-08-07) |
 
 ## Deploy to Railway
 
 1. Push to GitHub
 2. Connect repo to Railway
-3. Add \`OPENAI_API_KEY\` environment variable (for /chat)
-4. Deploy
+3. Add \`OPENAI_API_KEY\` and a strong \`RAG_API_TOKEN\` environment variable
+4. Add the frontend origin to \`CORS_ORIGINS\` only when the frontend is hosted separately
+5. Deploy
 
 ## HTTP Endpoints
 
@@ -591,6 +595,7 @@ curl -X POST https://your-app.railway.app/search \\
 \`\`\`bash
 curl -X POST https://your-app.railway.app/chat \\
   -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer $RAG_API_TOKEN" \\
   -d '{"question": "What is...?"}'
 \`\`\`
 
@@ -712,6 +717,8 @@ In Railway dashboard -> your service -> **"Variables"** tab:
 | Variable | Value | Required |
 |----------|-------|----------|
 | \`OPENAI_API_KEY\` | \`sk-proj-...\` | Ã¢Å“â€¦ Yes |
+| \`RAG_API_TOKEN\` | Long random bearer token | Ã¢Å“â€¦ Yes |
+| \`CORS_ORIGINS\` | Frontend origin(s), if separate | Ã¢ÂÅ’ Optional |
 | \`PORT\` | \`${port}\` | Ã¢ÂÅ’ Auto-set |
 | \`OPENAI_MODEL\` | \`gpt-5-nano-2025-08-07\` | Ã¢ÂÅ’ Optional |
 
@@ -745,6 +752,7 @@ curl -X POST https://YOUR-APP.railway.app/search \\
 \`\`\`bash
 curl -X POST https://YOUR-APP.railway.app/chat \\
   -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer $RAG_API_TOKEN" \\
   -d '{"question": "What is this about?"}'
 \`\`\`
 
@@ -836,23 +844,29 @@ Upload the contents of \`frontend/\` to:
   // .env.example - documents required environment variables
   await writeFile(path.join(paths.root, ".env.example"), `# Required for semantic search and the /chat endpoint
 ${apiKeyEnv}=sk-your-key-here
+RAG_API_TOKEN=replace-with-a-long-random-token
 
 # Optional configuration
 PORT=${port}
 # Set INDEXFOUNDRY_HTTP=1 to enable the HTTP API (stdio-only MCP is the default)
 OPENAI_MODEL=gpt-5-nano-2025-08-07
 NODE_ENV=production
+CORS_ORIGINS=
+CHAT_RATE_LIMIT_PER_MINUTE=30
 `);
   files.push(".env.example");
 
   // .env file for users to fill in (gitignored)
   await writeFile(path.join(paths.root, ".env"), `# Fill in your API keys below
 ${apiKeyEnv}=
+RAG_API_TOKEN=
 
 # Optional configuration
 PORT=${port}
 OPENAI_MODEL=gpt-5-nano-2025-08-07
 NODE_ENV=development
+CORS_ORIGINS=
+CHAT_RATE_LIMIT_PER_MINUTE=30
 `);
   files.push(".env");
 
@@ -915,15 +929,6 @@ window.LOCAL_CONFIG = {
 `);
     files.push('frontend/local.config.js.example');
 
-    // Also create local.config.js for immediate local development use
-    await writeFile(path.join(frontendDir, 'local.config.js'), `// Local development configuration (auto-generated)
-// Edit RAG_SERVER URL if running on a different port
-
-window.LOCAL_CONFIG = {
-  RAG_SERVER: 'http://localhost:${port}'
-};
-`);
-    files.push('frontend/local.config.js');
   }
 
   return files;
