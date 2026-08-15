@@ -711,6 +711,15 @@ describe('Exported server template', () => {
     expect(generateMcpServerSourceForTest()).toContain('WARNING: index was built with');
   });
 
+  it('keeps bearer authentication independent from caller-controlled Origin', async () => {
+    const { generateMcpServerSourceForTest } = await import('../src/tools/projects.js');
+    const source = generateMcpServerSourceForTest();
+
+    expect(source).toContain('Bearer token required');
+    expect(source).not.toContain('if (origin === requestOrigin) return true;');
+    expect(source).toContain('app.set("trust proxy", 1)');
+  });
+
   it('emits a runtime config carrying the export-time options', async () => {
     const { buildServerConfigForTest } = await import('../src/tools/projects.js');
     const config = JSON.parse(buildServerConfigForTest('my-server', 'My description', 9090, false));

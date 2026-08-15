@@ -139,14 +139,6 @@ function tokenMatches(expected: string, received: string): boolean {
 }
 
 function requireApiToken(req: express.Request, res: express.Response): boolean {
-  // The bundled frontend is served by this same Express instance. It cannot
-  // safely embed the server secret, so same-origin browser requests rely on
-  // the browser-origin policy below; API and cross-origin callers still need
-  // the bearer token when one is configured.
-  const origin = req.header("origin");
-  const requestOrigin = `${req.protocol}://${req.get("host")}`;
-  if (origin === requestOrigin) return true;
-
   const expectedToken = process.env.RAG_API_TOKEN?.trim();
   if (!expectedToken) {
     if (process.env.NODE_ENV === "production") {
@@ -154,7 +146,7 @@ function requireApiToken(req: express.Request, res: express.Response): boolean {
       return false;
     }
     if (!missingTokenWarningLogged) {
-      console.error("[WARN] RAG_API_TOKEN is not configured; cross-origin chat auth is disabled outside production");
+      console.error("[WARN] RAG_API_TOKEN is not configured; chat auth is disabled outside production");
       missingTokenWarningLogged = true;
     }
     return true;

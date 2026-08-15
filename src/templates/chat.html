@@ -1309,6 +1309,36 @@
         const typing = document.getElementById('typing-wrapper');
         if (typing) typing.remove();
       }
+
+      getApiToken() {
+        if (this.config.ragApiToken) return this.config.ragApiToken;
+        try {
+          return sessionStorage.getItem('indexfoundry-rag-api-token') || '';
+        } catch {
+          return '';
+        }
+      }
+
+      rememberApiToken(token) {
+        this.config.ragApiToken = token;
+        try {
+          sessionStorage.setItem('indexfoundry-rag-api-token', token);
+        } catch {
+          // Continue with the in-memory token when storage is unavailable.
+        }
+      }
+
+      async postChat(payload, token) {
+        const headers = { 'Content-Type': 'application/json' };
+        if (token) {
+          headers.Authorization = `Bearer ${token}`;
+        }
+        return fetch(`${this.config.ragServer}/chat`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(payload)
+        });
+      }
       
       /**
        * Main send message handler
@@ -1350,17 +1380,19 @@
             payload.conversation_id = this.conversationId;
           }
           
-          // Call RAG server's /chat endpoint
-          const headers = { 'Content-Type': 'application/json' };
-          if (this.config.ragApiToken) {
-            headers.Authorization = `Bearer ${this.config.ragApiToken}`;
+          // Call RAG server's /chat endpoint. Production deployments keep the
+          // bearer token server-side; users can enter it once and retain it
+          // only for this browser session.
+          let token = this.getApiToken();
+          let response = await this.postChat(payload, token);
+          if (response.status === 401 && !token) {
+            const enteredToken = window.prompt('This RAG server requires a bearer token. Enter RAG_API_TOKEN:');
+            if (enteredToken?.trim()) {
+              token = enteredToken.trim();
+              this.rememberApiToken(token);
+              response = await this.postChat(payload, token);
+            }
           }
-
-          const response = await fetch(`${this.config.ragServer}/chat`, {
-            method: 'POST',
-            headers,
-            body: JSON.stringify(payload)
-          });
           
           if (!response.ok) {
             const errorText = await response.text();

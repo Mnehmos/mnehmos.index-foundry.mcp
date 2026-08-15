@@ -585,11 +585,12 @@ ${embeddingKeyDocumentation}
 | \`CHAT_RATE_LIMIT_PER_MINUTE\` | No | Per-client \`/chat\` limit; defaults to 30 |
 | \`OPENAI_MODEL\` | No | Model for chat (default: gpt-5-nano-2025-08-07) |
 
-The bundled frontend is served from the RAG server's own origin, so its browser
-requests use the same-origin policy and do not embed \`RAG_API_TOKEN\`. Bearer
-authentication remains required for API clients and separately hosted
-frontends; add their exact origin to \`CORS_ORIGINS\`. If the RAG data is
-private, put an authenticated application or proxy in front of the bundled UI.
+The bundled frontend is served from the RAG server's own origin and never
+embeds \`RAG_API_TOKEN\`. In production, it prompts the user for the bearer
+token and retains it only in that browser session. Bearer authentication is
+also required for API clients and separately hosted frontends; add their exact
+origin to \`CORS_ORIGINS\`. If the RAG data is private, put an authenticated
+application or proxy in front of the bundled UI.
 
 ## Deploy to Railway
 
